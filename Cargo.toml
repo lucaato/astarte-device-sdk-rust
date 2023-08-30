@@ -51,6 +51,12 @@ url = "2.4.0"
 uuid = { version = "1.3.4", features = ["v5", "v4"] }
 webpki = "0.22.0"
 x509-cert = { version = "0.2.3", features = ["builder"] }
+# TODO replace with actual crate when the pr gets merged and released
+astarte-message-hub-proto = { git = "https://github.com/harlem88/astarte-message-hub.git", branch = "workspace", optional = true }
+# TODO This dependency should be re exported by the astarte-message-hub-proto crate ?
+tonic = { version = "0.8.2", optional = true }
+futures = "0.3.28"
+bytes = "1.5.0"
 
 [dev-dependencies]
 astarte-device-sdk-derive = { path = "./astarte-device-sdk-derive" }
@@ -69,3 +75,4 @@ features = ["precommit-hook", "run-cargo-test", "run-cargo-clippy", "run-cargo-f
 [features]
 derive = ["astarte-device-sdk-derive"]
 openssl = ["dep:openssl"]
+message-hub-client = ["dep:astarte-message-hub-proto", "dep:tonic"]

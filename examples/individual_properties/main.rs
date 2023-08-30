@@ -23,7 +23,7 @@ use std::error::Error as StdError;
 use serde::{Deserialize, Serialize};
 
 use astarte_device_sdk::{
-    error::Error, options::AstarteOptions, store::SqliteStore, types::AstarteType,
+    error::Error, options::DeviceBuilder, store::SqliteStore, types::AstarteType,
     AstarteDeviceSdkSqlite,
 };
 
@@ -73,7 +73,7 @@ async fn main() -> Result<(), DynError> {
     let db = SqliteStore::new("./examples/individual_properties/astarte-example-db.sqlite").await?;
 
     // Create Astarte Options
-    let sdk_options = AstarteOptions::new(
+    let sdk_options = DeviceBuilder::new(
         &cfg.realm,
         &cfg.device_id,
         &cfg.credentials_secret,

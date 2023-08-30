@@ -35,7 +35,7 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use tokio::{task, time};
 
-use astarte_device_sdk::options::AstarteOptions;
+use astarte_device_sdk::options::DeviceBuilder;
 use astarte_device_sdk::types::AstarteType;
 use astarte_device_sdk::{AstarteDeviceSdk, AstarteDeviceSdkMemory};
 
@@ -129,7 +129,7 @@ async fn e2etest_impl() {
 
     let test_cfg = TestCfg::init().expect("Failed configuration initialization");
 
-    let mut sdk_options = AstarteOptions::new(
+    let mut sdk_options = DeviceBuilder::new(
         &test_cfg.realm,
         &test_cfg.device_id,
         &test_cfg.credentials_secret,

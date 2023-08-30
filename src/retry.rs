@@ -21,9 +21,9 @@
 use std::time::Duration;
 
 use log::{debug, error};
-use rumqttc::Event;
+use rumqttc::{Event, EventLoop};
 
-use crate::{error::Error, AstarteDeviceSdk};
+use crate::error::Error;
 
 /// Iterator that yields a delay that will increase exponentially till the max,
 #[derive(Debug, Clone, Copy)]
@@ -34,15 +34,16 @@ pub(crate) struct DelaiedPoll {
     base: u32,
 }
 
+// TODO this should get generalized if needed on other connection types or it can be used only for mqtt connection
 impl DelaiedPoll {
     /// Retry to pool the connection after an error occurred
-    pub(crate) async fn retry_poll_event<T>(sdk: &AstarteDeviceSdk<T>) -> Result<Event, Error> {
+    pub(crate) async fn retry_poll_event(eventloop: &mut EventLoop) -> Result<Event, Error> {
         for delay in Self::default() {
             debug!("waiting for {delay} seconds before retry");
 
             tokio::time::sleep(Duration::from_secs(delay.into())).await;
 
-            match sdk.eventloop.lock().await.poll().await {
+            match eventloop.poll().await {
                 Ok(event) => return Ok(event),
                 Err(err) => {
                     error!("couldn't poll for next event: {err:#?}");

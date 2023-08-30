@@ -355,7 +355,7 @@ mod test {
     use std::{collections::HashMap, str::FromStr};
 
     use crate::{
-        interfaces::Interfaces, mapping, options::AstarteOptions, payload, types::AstarteType,
+        interfaces::Interfaces, mapping, options::DeviceBuilder, payload, types::AstarteType,
         Interface,
     };
 
@@ -906,7 +906,7 @@ mod test {
 
     #[test]
     fn test_get_instrospection_string() {
-        let mut options = AstarteOptions::new("test", "test", "test", "test");
+        let mut options = DeviceBuilder::new("test", "test", "test", "test");
         options = options
             .interface_directory("examples/individual_datastream/interfaces")
             .expect("Failed to set interface directory");

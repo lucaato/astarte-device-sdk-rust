@@ -21,7 +21,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use astarte_device_sdk::{error::Error, options::AstarteOptions};
+use astarte_device_sdk::{error::Error, options::DeviceBuilder};
 
 #[derive(Deserialize)]
 struct Config {
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Error> {
     let cfg: Config = serde_json::from_str(&file).unwrap();
 
     // Create Astarte Options
-    let sdk_options = AstarteOptions::new(
+    let sdk_options = DeviceBuilder::new(
         &cfg.realm,
         &cfg.device_id,
         &cfg.credentials_secret,

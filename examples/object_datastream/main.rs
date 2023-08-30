@@ -18,7 +18,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use astarte_device_sdk::{error::Error, options::AstarteOptions, AstarteAggregate};
+use astarte_device_sdk::{error::Error, options::DeviceBuilder, AstarteAggregate};
 #[cfg(not(feature = "derive"))]
 use astarte_device_sdk_derive::AstarteAggregate;
 
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Error> {
     let cfg: Config = serde_json::from_str(&file).unwrap();
 
     // Create Astarte Options
-    let sdk_options = AstarteOptions::new(
+    let sdk_options = DeviceBuilder::new(
         &cfg.realm,
         &cfg.device_id,
         &cfg.credentials_secret,
