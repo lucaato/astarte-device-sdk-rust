@@ -38,6 +38,7 @@ pub mod store;
 mod topic;
 pub mod types;
 
+use async_trait::async_trait;
 use connection::{Connection, Register};
 use interfaces::Interfaces;
 #[cfg(test)]
@@ -185,407 +186,11 @@ pub struct AstarteDeviceDataEvent {
     pub data: Aggregation,
 }
 
-impl<S, C> AstarteDeviceSdk<S, C>
-// TODO specify in functions
-where
-    S: PropertyStore,
-    C: Connection<S> + 'static,
-{
-    /// Create a new instance of the Astarte Device SDK.
-    ///
-    /// ```no_run
-    /// use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions};
-    ///
-    /// #[tokio::main]
-    /// fn main() {
-    ///     let sdk_options = AstarteOptions::new("", "", "", "")
-    ///     .interface_directory("")
-    ///     .unwrap()
-    ///     .ignore_ssl_errors();
-    ///
-    ///     let mut device = AstarteDeviceSdk::new(sdk_options).await.unwrap();
-    /// }
-    /// ```
-    pub(crate) fn new(
-        interfaces: Interfaces,
-        store: S,
-        connection: C,
-        tx: EventSender,
-    ) -> Self {
-
-        Self {
-            shared: Arc::new(SharedDevice {
-                interfaces: RwLock::new(interfaces),
-                store: StoreWrapper::new(store),
-                tx,
-            }),
-            connection,
-        }
-    }
-
-    /// Handles a payload received from a connection.
-    async fn store_payload<'a>(
-        &self,
-        interface: &str,
-        path: &MappingPath<'a>,
-        payload: &Aggregation,
-    ) -> Result<(), crate::Error> {
-        match payload {
-            Aggregation::Object(_) => Ok(()),
-            Aggregation::Individual(ref data) => {
-                let r_interfaces = self.interfaces.read().await;
-                let interface = r_interfaces
-                    .get_property(interface)
-                    .filter(|interface| interface.mapping(path).is_some());
-
-                if let Some(property) = interface {
-                    self.store_property(property, path, data).await?;
-                }
-
-                Ok(())
-            }
-        }
-    }
-
-    // I don't like the name maybe a better name for connection is actually transport like it was named
-    async fn handle_connection_event(&self, event_payload: <C as Connection<S>>::Payload) -> Result<Option<AstarteDeviceDataEvent>, crate::Error> {
-        match self.connection.handle_payload(&self, event_payload).await {
-            Ok(connection::ReceivedEvent::PurgeProperties(bdata)) => {
-                debug!("Purging properties");
-                self.purge_properties(&bdata).await?;
-
-                Ok(None)
-            }
-            Ok(connection::ReceivedEvent::Data(data)) => {
-                let mapping_path = MappingPath::try_from(&data.path[..])?;
-
-                self.store_payload(&data.interface, &mapping_path, &data.data).await?;
-
-                Ok(Some(data))
-            },
-            Err(err) => {
-                error!("error encountered while handling a received event: {err:#?}");
-
-                Err(err.into())
-            }
-        }
-    }
-
-    pub async fn handle_events(&mut self) -> Result<(), crate::Error> {
-        loop {
-            let event_payload = self.connection.next_event(&self.shared).await?;
-            let device = self.clone();
-
-            tokio::spawn(async move {
-                let data = device.handle_connection_event(event_payload).await;
-
-                if let Some(inner) = data.transpose() {
-                    device.tx.send(inner).await
-                        .expect("Channel dropped")
-                }
-            });
-        }
-    }
-
-    /// Store the property.
-    async fn store_property<'a>(
-        &self,
-        interface: PropertyRef<'a>,
-        path: &MappingPath<'a>,
-        data: &AstarteType,
-    ) -> Result<(), Error> {
-        debug_assert!(interface.is_property());
-        debug_assert!(interface.mapping(path).is_some());
-
-        let interface_name = interface.interface_name();
-        let version_major = interface.version_major();
-
-        self.store
-            .store_prop(interface_name, path.as_str(), data, version_major)
-            .await?;
-
-        trace!("property stored");
-
-        Ok(())
-    }
-
-    async fn purge_properties(&self, bdata: &[u8]) -> Result<(), Error> {
-        let stored_props = self.store.load_all_props().await?;
-
-        let paths = properties::extract_set_properties(bdata)?;
-
-        for stored_prop in stored_props {
-            if paths.contains(&format!("{}{}", stored_prop.interface, stored_prop.path)) {
-                continue;
-            }
-
-            self.store
-                .delete_prop(&stored_prop.interface, &stored_prop.path)
-                .await?;
-        }
-
-        Ok(())
-    }
-
-    /// Unset a device property.
-    ///
-    /// ```no_run
-    /// use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions};
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mut sdk_options = AstarteOptions::new("_","_","_","_");
-    ///     let (mut device, _rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
-    ///
-    ///     device
-    ///         .unset("my.interface.name", "/endpoint/path",)
-    ///         .await
-    ///         .unwrap();
-    /// }
-    /// ```
-    pub async fn unset(&self, interface_name: &str, interface_path: &str) -> Result<(), Error> {
-        trace!("unsetting {} {}", interface_name, interface_path);
-
-        let path = MappingPath::try_from(interface_path)?;
-
-        if cfg!(debug_assertions) {
-            self.interfaces
-                .read()
-                .await
-                .validate_send(interface_name, &path, &[], &None)?;
-        }
-
-        self.send_with_timestamp_impl(interface_name, &path, AstarteType::Unset, None)
-            .await?;
-
-        Ok(())
-    }
-
-    /// Get property, when present, from the allocated storage.
-    ///
-    /// ```no_run
-    /// use astarte_device_sdk::{
-    ///     AstarteDeviceSdk, store::sqlite::SqliteStore, options::AstarteOptions,
-    ///     types::AstarteType
-    /// };
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let database = SqliteStore::new("path/to/database/file.sqlite")
-    ///         .await
-    ///         .unwrap();
-    ///     let mut sdk_options = AstarteOptions::new("_","_","_","_").store(database);
-    ///     let (mut device, _rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
-    ///
-    ///     let property_value: Option<AstarteType> = device
-    ///         .get_property("my.interface.name", "/endpoint/path",)
-    ///         .await
-    ///         .unwrap();
-    /// }
-    /// ```
-    pub async fn get_property(
-        &self,
-        interface: &str,
-        path: &str,
-    ) -> Result<Option<AstarteType>, Error> {
-        let path_mappings = MappingPath::try_from(path)?;
-
-        self.property(interface, &path_mappings).await
-    }
-
-    /// Get property, when present, from the allocated storage.
-    ///
-    /// This will use a [`MappingPath`] to get the property, which is an parsed endpoint.
-    pub(crate) async fn property<'a>(
-        &self,
-        interface: &str,
-        path: &MappingPath<'a>,
-    ) -> Result<Option<AstarteType>, Error> {
-        let major = self
-            .interfaces
-            .read()
-            .await
-            .get_property_major(interface, path);
-
-        match major {
-            Some(major) => self
-                .store
-                .load_prop(interface, path.as_str(), major)
-                .await
-                .map_err(Error::from),
-            None => Ok(None),
-        }
-    }
-
-    /// Check if a property is already stored in the database with the same value.
-    /// Useful to prevent sending a property twice with the same value.
-    async fn check_property_already_stored<'a>(
-        &self,
-        interface: PropertyRef<'a>,
-        interface_path: &MappingPath<'a>,
-        data: &AstarteType,
-    ) -> Result<bool, Error> {
-        // Check the mapping exists
-        interface
-            .mapping(interface_path)
-            .ok_or_else(|| Error::SendError(format!("Mapping {interface_path} doesn't exist")))?;
-
-        // Check if already in db
-        let stored = self
-            .store
-            .load_prop(interface.interface_name(), interface_path.as_str(), 0)
-            .await?;
-
-        match stored {
-            Some(value) => Ok(value.eq(data)),
-            None => Ok(false),
-        }
-    }
-
-    async fn store_property_on_send<'a>(
-        &self,
-        property: PropertyRef<'a>,
-        interface_path: &MappingPath<'a>,
-        data: &AstarteType,
-    ) -> Result<(), Error> {
-        property.mapping(interface_path).ok_or_else(|| {
-            Error::Interface(InterfaceError::MappingNotFound {
-                path: interface_path.to_string(),
-            })
-        })?;
-
-        self.store
-            .store_prop(
-                property.interface_name(),
-                interface_path.as_str(),
-                data,
-                property.version_major(),
-            )
-            .await?;
-
-        debug!("Stored new property in database");
-
-        Ok(())
-    }
-
-    // ------------------------------------------------------------------------
-    // individual types
-    // ------------------------------------------------------------------------
-
-    /// Send an individual datastream/property on an interface.
-    ///
-    /// The usage is the same of
-    /// [send_with_timestamp()][crate::AstarteDeviceSdk::send_with_timestamp],
-    /// without the timestamp.
-    pub async fn send<D>(
-        &self,
-        interface_name: &str,
-        interface_path: &str,
-        data: D,
-    ) -> Result<(), Error>
-    where
-        D: TryInto<AstarteType>,
-    {
-        let path = MappingPath::try_from(interface_path)?;
-
-        self.send_with_timestamp_impl(interface_name, &path, data, None)
-            .await
-    }
-
-    /// Send an individual datastream/property on an interface, with an explicit timestamp.
-    ///
-    /// ```no_run
-    /// use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions};
-    /// use chrono::{TimeZone, Utc};
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mut sdk_options = AstarteOptions::new("_","_","_","_");
-    ///     let (mut device, _rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
-    ///
-    ///     let value: i32 = 42;
-    ///     let timestamp = Utc.timestamp_opt(1537449422, 0).unwrap();
-    ///     device.send_with_timestamp("my.interface.name", "/endpoint/path", value, timestamp)
-    ///         .await
-    ///         .unwrap();
-    /// }
-    /// ```
-    pub async fn send_with_timestamp<D>(
-        &self,
-        interface_name: &str,
-        interface_path: &str,
-        data: D,
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), Error>
-    where
-        D: TryInto<AstarteType>,
-    {
-        let mapping = MappingPath::try_from(interface_path)?;
-
-        self.send_with_timestamp_impl(interface_name, &mapping, data, Some(timestamp))
-            .await
-    }
-
-    async fn send_with_timestamp_impl<'a, D>(
-        &self,
-        interface_name: &str,
-        interface_path: &MappingPath<'a>,
-        data: D,
-        timestamp: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<(), Error>
-    where
-        D: TryInto<AstarteType>,
-    {
-        debug!("sending {} {}", interface_name, interface_path);
-
-        let data = data.try_into().map_err(|_| TypeError::Conversion)?;
-
-        let interfaces = self.interfaces.read().await;
-        let opt_property = interfaces.get_property(interface_name);
-        if let Some(property) = opt_property {
-            let stored = self
-                .check_property_already_stored(property, interface_path, &data)
-                .await?;
-
-            if stored {
-                debug!("property was already sent, no need to send it again");
-                return Ok(());
-            }
-        }
-
-        let buf = self.connection.serialize_individual(&data, timestamp)?;
-
-        self.connection.send(&self.shared, interface_name, interface_path, buf, timestamp);
-
-        // we store the property in the database after it has been successfully sent
-        if let Some(property) = opt_property {
-            self.store_property_on_send(property, interface_path, &data)
-                .await?;
-        }
-
-        Ok(())
-    }
-
+#[async_trait]
+pub trait Device {
     // ------------------------------------------------------------------------
     // object types
     // ------------------------------------------------------------------------
-    async fn send_object_with_timestamp_impl<'a, D>(
-        &self,
-        interface_name: &str,
-        interface_path: &MappingPath<'a>,
-        data: D,
-        timestamp: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<(), Error>
-    where
-        D: AstarteAggregate,
-    {
-        let aggregate = data.astarte_aggregate()?;
-        let buf = self.connection.serialize_object(&aggregate, timestamp)?;
-
-        self.connection.send(&self.shared, interface_name, interface_path, buf, timestamp);
-
-        Ok(())
-    }
 
     /// Send an object datastreamy on an interface, with an explicit timestamp.
     ///
@@ -616,7 +221,7 @@ where
     ///         .unwrap();
     /// }
     /// ```
-    pub async fn send_object_with_timestamp<D>(
+    async fn send_object_with_timestamp<D>(
         &self,
         interface_name: &str,
         interface_path: &str,
@@ -624,7 +229,130 @@ where
         timestamp: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), Error>
     where
-        D: AstarteAggregate,
+        D: AstarteAggregate + Send;
+
+    /// Send an object datastream on an interface.
+    ///
+    /// The usage is the same of
+    /// [send_object_with_timestamp()][crate::AstarteDeviceSdk::send_object_with_timestamp],
+    /// without the timestamp.
+    async fn send_object<D>(
+        &self,
+        interface_name: &str,
+        interface_path: &str,
+        data: D,
+    ) -> Result<(), Error>
+    where
+        D: AstarteAggregate + Send;
+
+
+    // ------------------------------------------------------------------------
+    // individual types
+    // ------------------------------------------------------------------------
+
+    /// Send an individual datastream/property on an interface, with an explicit timestamp.
+    ///
+    /// ```no_run
+    /// use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions};
+    /// use chrono::{TimeZone, Utc};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mut sdk_options = AstarteOptions::new("_","_","_","_");
+    ///     let (mut device, _rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
+    ///
+    ///     let value: i32 = 42;
+    ///     let timestamp = Utc.timestamp_opt(1537449422, 0).unwrap();
+    ///     device.send_with_timestamp("my.interface.name", "/endpoint/path", value, timestamp)
+    ///         .await
+    ///         .unwrap();
+    /// }
+    /// ```
+    async fn send_with_timestamp<D>(
+        &self,
+        interface_name: &str,
+        interface_path: &str,
+        data: D,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), Error>
+    where
+        D: TryInto<AstarteType> + Send;
+
+    /// Send an individual datastream/property on an interface.
+    ///
+    /// The usage is the same of
+    /// [send_with_timestamp()][crate::AstarteDeviceSdk::send_with_timestamp],
+    /// without the timestamp.
+    async fn send<D>(
+        &self,
+        interface_name: &str,
+        interface_path: &str,
+        data: D,
+    ) -> Result<(), Error>
+    where
+        D: TryInto<AstarteType> + Send;
+
+    async fn handle_events(&mut self) -> Result<(), crate::Error>;
+
+    /// Unset a device property.
+    ///
+    /// ```no_run
+    /// use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mut sdk_options = AstarteOptions::new("_","_","_","_");
+    ///     let (mut device, _rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
+    ///
+    ///     device
+    ///         .unset("my.interface.name", "/endpoint/path",)
+    ///         .await
+    ///         .unwrap();
+    /// }
+    /// ```
+    async fn unset(&self, interface_name: &str, interface_path: &str) -> Result<(), Error>;
+}
+
+#[async_trait]
+pub trait InterfaceRegister {
+    /// Add a new [`Interface`] to the device interfaces.
+    async fn add_interface(&self, interface: Interface) -> Result<(), Error>;
+
+    /// Add a new interface from the provided file.
+    async fn add_interface_from_file(&self, file_path: &str) -> Result<(), Error>;
+
+    /// Add a new interface from a string. The string should contain a valid json formatted
+    /// interface.
+    async fn add_interface_from_str(&self, json_str: &str) -> Result<(), Error>;
+
+    /// Remove the interface with the name specified as argument.
+    async fn remove_interface(&self, interface_name: &str) -> Result<(), Error>;
+}
+
+#[async_trait]
+pub trait PropertyRegister {
+    async fn get_property(
+            &self,
+            interface: &str,
+            path: &str,
+        ) -> Result<Option<AstarteType>, Error>;
+}
+
+#[async_trait]
+impl<S, C> Device for AstarteDeviceSdk<S, C>
+where
+    S: PropertyStore,
+    C: Connection<S> + 'static,
+{
+    async fn send_object_with_timestamp<D>(
+        &self,
+        interface_name: &str,
+        interface_path: &str,
+        data: D,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), Error>
+    where
+        D: AstarteAggregate + Send,
     {
         let path = MappingPath::try_from(interface_path)?;
 
@@ -632,34 +360,93 @@ where
             .await
     }
 
-    /// Send an object datastream on an interface.
-    ///
-    /// The usage is the same of
-    /// [send_object_with_timestamp()][crate::AstarteDeviceSdk::send_object_with_timestamp],
-    /// without the timestamp.
-    pub async fn send_object<D>(
+    async fn send_object<D>(
         &self,
         interface_name: &str,
         interface_path: &str,
         data: D,
     ) -> Result<(), Error>
     where
-        D: AstarteAggregate,
+        D: AstarteAggregate + Send,
     {
         let path = MappingPath::try_from(interface_path)?;
 
         self.send_object_with_timestamp_impl(interface_name, &path, data, None)
             .await
     }
+
+    async fn send<D>(
+        &self,
+        interface_name: &str,
+        interface_path: &str,
+        data: D,
+    ) -> Result<(), Error>
+    where
+        D: TryInto<AstarteType> + Send,
+    {
+        let path = MappingPath::try_from(interface_path)?;
+
+        self.send_with_timestamp_impl(interface_name, &path, data, None).await
+    }
+
+    async fn send_with_timestamp<D>(
+        &self,
+        interface_name: &str,
+        interface_path: &str,
+        data: D,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), Error>
+    where
+        D: TryInto<AstarteType> + Send,
+    {
+        let mapping = MappingPath::try_from(interface_path)?;
+
+        self.send_with_timestamp_impl(interface_name, &mapping, data, Some(timestamp))
+            .await
+    }
+
+    async fn unset(&self, interface_name: &str, interface_path: &str) -> Result<(), Error> {
+        trace!("unsetting {} {}", interface_name, interface_path);
+
+        let path = MappingPath::try_from(interface_path)?;
+
+        if cfg!(debug_assertions) {
+            self.interfaces
+                .read()
+                .await
+                .validate_send(interface_name, &path, &[], &None)?;
+        }
+
+        self.send_with_timestamp_impl(interface_name, &path, AstarteType::Unset, None)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn handle_events(&mut self) -> Result<(), crate::Error> {
+        loop {
+            let event_payload = self.connection.next_event(&self.shared).await?;
+            let device = self.clone();
+
+            tokio::spawn(async move {
+                let data = device.handle_connection_event(event_payload).await;
+
+                if let Some(inner) = data.transpose() {
+                    device.tx.send(inner).await
+                        .expect("Channel dropped")
+                }
+            });
+        }
+    }
 }
 
-impl <S, C> AstarteDeviceSdk<S, C>
+#[async_trait]
+impl<S, C> InterfaceRegister for AstarteDeviceSdk<S, C>
 where
-    C: Connection<S> + Register,
     S: PropertyStore,
+    C: Connection<S> + Register + 'static,
 {
-    /// Add a new [`Interface`] to the device interfaces.
-    pub async fn add_interface(&self, interface: Interface) -> Result<(), Error> {
+    async fn add_interface(&self, interface: Interface) -> Result<(), Error> {
         if interface.ownership() == interface::Ownership::Server {
             self.connection.subscribe(interface.interface_name())
                 .await?;
@@ -671,23 +458,334 @@ where
         Ok(())
     }
 
-    /// Add a new interface from the provided file.
-    pub async fn add_interface_from_file(&self, file_path: &str) -> Result<(), Error> {
+    async fn add_interface_from_file(&self, file_path: &str) -> Result<(), Error> {
         let path = Path::new(file_path);
         let interface = Interface::from_file(path)?;
 
         self.add_interface(interface).await
     }
 
-    /// Add a new interface from a string. The string should contain a valid json formatted
-    /// interface.
-    pub async fn add_interface_from_str(&self, json_str: &str) -> Result<(), Error> {
+    async fn add_interface_from_str(&self, json_str: &str) -> Result<(), Error> {
         let interface: Interface = Interface::from_str(json_str)?;
 
         self.add_interface(interface).await
     }
 
-    async fn remove_interface_from_map(&self, interface_name: &str) -> Result<Interface, Error> {
+    async fn remove_interface(&self, interface_name: &str) -> Result<(), Error> {
+        let interface = self.remove_interface_from_map(interface_name).await?;
+        self.remove_properties_from_store(interface_name).await?;
+        self.connection.send_introspection(self.interfaces.read().await.get_introspection_string()).await?;
+
+        if interface.ownership() == interface::Ownership::Server {
+            self.connection.unsubscribe(interface_name).await?;
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<S, C> PropertyRegister for AstarteDeviceSdk<S, C>
+where
+    S: PropertyStore,
+    C: Connection<S> + 'static,
+{
+    async fn get_property(
+        &self,
+        interface: &str,
+        path: &str,
+    ) -> Result<Option<AstarteType>, Error> {
+        let path_mappings = MappingPath::try_from(path)?;
+
+        self.property(interface, &path_mappings).await
+    }
+}
+
+impl<S, C> AstarteDeviceSdk<S, C> {
+    /// Create a new instance of the Astarte Device SDK.
+    ///
+    /// ```no_run
+    /// use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions};
+    ///
+    /// #[tokio::main]
+    /// fn main() {
+    ///     let sdk_options = AstarteOptions::new("", "", "", "")
+    ///     .interface_directory("")
+    ///     .unwrap()
+    ///     .ignore_ssl_errors();
+    ///
+    ///     let mut device = AstarteDeviceSdk::new(sdk_options).await.unwrap();
+    /// }
+    /// ```
+    pub(crate) fn new(
+        interfaces: Interfaces,
+        store: S,
+        connection: C,
+        tx: EventSender,
+    ) -> Self
+    where
+        S: PropertyStore,
+        C: Connection<S> + 'static,
+    {
+
+        Self {
+            shared: Arc::new(SharedDevice {
+                interfaces: RwLock::new(interfaces),
+                store: StoreWrapper::new(store),
+                tx,
+            }),
+            connection,
+        }
+    }
+
+    /// Handles a payload received from a connection.
+    async fn store_payload<'a>(
+        &self,
+        interface: &str,
+        path: &MappingPath<'a>,
+        payload: &Aggregation,
+    ) -> Result<(), crate::Error>
+    where
+        S: PropertyStore,
+    {
+        match payload {
+            Aggregation::Object(_) => Ok(()),
+            Aggregation::Individual(ref data) => {
+                let r_interfaces = self.interfaces.read().await;
+                let interface = r_interfaces
+                    .get_property(interface)
+                    .filter(|interface| interface.mapping(path).is_some());
+
+                if let Some(property) = interface {
+                    self.store_property(property, path, data).await?;
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    // I don't like the name maybe a better name for connection is actually transport like it was named
+    async fn handle_connection_event(&self, event_payload: <C as Connection<S>>::Payload) -> Result<Option<AstarteDeviceDataEvent>, crate::Error>
+    where
+        S: PropertyStore,
+        C: Connection<S>
+    {
+        match self.connection.handle_payload(&self, event_payload).await {
+            Ok(connection::ReceivedEvent::PurgeProperties(bdata)) => {
+                debug!("Purging properties");
+                self.purge_properties(&bdata).await?;
+
+                Ok(None)
+            }
+            Ok(connection::ReceivedEvent::Data(data)) => {
+                let mapping_path = MappingPath::try_from(&data.path[..])?;
+
+                self.store_payload(&data.interface, &mapping_path, &data.data).await?;
+
+                Ok(Some(data))
+            },
+            Err(err) => {
+                error!("error encountered while handling a received event: {err:#?}");
+
+                Err(err.into())
+            }
+        }
+    }
+
+    /// Store the property.
+    async fn store_property<'a>(
+        &self,
+        interface: PropertyRef<'a>,
+        path: &MappingPath<'a>,
+        data: &AstarteType,
+    ) -> Result<(), Error>
+    where
+        S: PropertyStore
+    {
+        debug_assert!(interface.is_property());
+        debug_assert!(interface.mapping(path).is_some());
+
+        let interface_name = interface.interface_name();
+        let version_major = interface.version_major();
+
+        self.store
+            .store_prop(interface_name, path.as_str(), data, version_major)
+            .await?;
+
+        trace!("property stored");
+
+        Ok(())
+    }
+
+    async fn purge_properties(&self, bdata: &[u8]) -> Result<(), Error>
+    where
+        S: PropertyStore {
+        let stored_props = self.store.load_all_props().await?;
+
+        let paths = properties::extract_set_properties(bdata)?;
+
+        for stored_prop in stored_props {
+            if paths.contains(&format!("{}{}", stored_prop.interface, stored_prop.path)) {
+                continue;
+            }
+
+            self.store
+                .delete_prop(&stored_prop.interface, &stored_prop.path)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Get property, when present, from the allocated storage.
+    ///
+    /// This will use a [`MappingPath`] to get the property, which is an parsed endpoint.
+    pub(crate) async fn property<'a>(
+        &self,
+        interface: &str,
+        path: &MappingPath<'a>,
+    ) -> Result<Option<AstarteType>, Error>
+    where
+        S: PropertyStore {
+
+        let major = self
+            .interfaces
+            .read()
+            .await
+            .get_property_major(interface, path);
+
+        match major {
+            Some(major) => self
+                .store
+                .load_prop(interface, path.as_str(), major)
+                .await
+                .map_err(Error::from),
+            None => Ok(None),
+        }
+    }
+
+    /// Check if a property is already stored in the database with the same value.
+    /// Useful to prevent sending a property twice with the same value.
+    async fn check_property_already_stored<'a>(
+        &self,
+        interface: PropertyRef<'a>,
+        interface_path: &MappingPath<'a>,
+        data: &AstarteType,
+    ) -> Result<bool, Error>
+    where
+        S: PropertyStore
+    {
+        // Check the mapping exists
+        interface
+            .mapping(interface_path)
+            .ok_or_else(|| Error::SendError(format!("Mapping {interface_path} doesn't exist")))?;
+
+        // Check if already in db
+        let stored = self
+            .store
+            .load_prop(interface.interface_name(), interface_path.as_str(), 0)
+            .await?;
+
+        match stored {
+            Some(value) => Ok(value.eq(data)),
+            None => Ok(false),
+        }
+    }
+
+    async fn store_property_on_send<'a>(
+        &self,
+        property: PropertyRef<'a>,
+        interface_path: &MappingPath<'a>,
+        data: &AstarteType,
+    ) -> Result<(), Error>
+    where
+        S: PropertyStore {
+        property.mapping(interface_path).ok_or_else(|| {
+            Error::Interface(InterfaceError::MappingNotFound {
+                path: interface_path.to_string(),
+            })
+        })?;
+
+        self.store
+            .store_prop(
+                property.interface_name(),
+                interface_path.as_str(),
+                data,
+                property.version_major(),
+            )
+            .await?;
+
+        debug!("Stored new property in database");
+
+        Ok(())
+    }
+
+    async fn send_with_timestamp_impl<'a, D>(
+        &self,
+        interface_name: &str,
+        interface_path: &MappingPath<'a>,
+        data: D,
+        timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), Error>
+    where
+        D: TryInto<AstarteType> + Send,
+        S: PropertyStore,
+        C: Connection<S>,
+    {
+        debug!("sending {} {}", interface_name, interface_path);
+
+        let data = data.try_into().map_err(|_| TypeError::Conversion)?;
+
+        let interfaces = self.interfaces.read().await;
+        let opt_property = interfaces.get_property(interface_name);
+        if let Some(property) = opt_property {
+            let stored = self
+                .check_property_already_stored(property, interface_path, &data)
+                .await?;
+
+            if stored {
+                debug!("property was already sent, no need to send it again");
+                return Ok(());
+            }
+        }
+
+        let buf = self.connection.serialize(&data, timestamp)?;
+
+        self.connection.send(&self.shared, interface_name, interface_path, buf, timestamp).await?;
+
+        // we store the property in the database after it has been successfully sent
+        if let Some(property) = opt_property {
+            self.store_property_on_send(property, interface_path, &data)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn send_object_with_timestamp_impl<'a, D>(
+        &self,
+        interface_name: &str,
+        interface_path: &MappingPath<'a>,
+        data: D,
+        timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), Error>
+    where
+        D: AstarteAggregate + Send,
+        S: PropertyStore,
+        C: Connection<S>,
+    {
+        let aggregate = data.astarte_aggregate()?;
+        let buf = self.connection.serialize_object(&aggregate, timestamp)?;
+
+        self.connection.send(&self.shared, interface_name, interface_path, buf, timestamp).await
+    }
+
+    async fn remove_interface_from_map(&self, interface_name: &str) -> Result<Interface, Error>
+    where
+        S: PropertyStore,
+        C: Connection<S> + Register,
+    {
         self.interfaces.write().await
             .remove(interface_name)
             .ok_or_else(|| {
@@ -697,7 +795,11 @@ where
             })
     }
 
-    async fn remove_properties_from_store(&self, interface_name: &str) -> Result<(), Error> {
+    async fn remove_properties_from_store(&self, interface_name: &str) -> Result<(), Error>
+    where
+        S: PropertyStore,
+        C: Connection<S> + Register,
+    {
         let interfaces = self.interfaces.read().await;
         let mappings = interfaces.get_property(interface_name);
 
@@ -710,19 +812,6 @@ where
             let path = mapping.endpoint();
             self.store.delete_prop(interface_name, path).await?;
             debug!("Stored property {}{} deleted", interface_name, path);
-        }
-
-        Ok(())
-    }
-
-    /// Remove the interface with the name specified as argument.
-    pub async fn remove_interface(&self, interface_name: &str) -> Result<(), Error> {
-        let interface = self.remove_interface_from_map(interface_name).await?;
-        self.remove_properties_from_store(interface_name).await?;
-        self.connection.send_introspection(self.interfaces.read().await.get_introspection_string()).await?;
-
-        if interface.ownership() == interface::Ownership::Server {
-            self.connection.unsubscribe(interface_name);
         }
 
         Ok(())

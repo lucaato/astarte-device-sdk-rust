@@ -156,7 +156,7 @@ impl MqttConfig {
         self
     }
 
-    pub async fn connect(self) -> Result<Mqtt, crate::Error> {
+    async fn connect(self) -> Result<Mqtt, crate::Error> {
         let mqtt_options = pairing::get_transport_config(&self).await?;
 
         debug!("{:#?}", mqtt_options);
@@ -179,23 +179,6 @@ impl GrpcOptions {
         Self {
             endpoint: endpoint.to_owned(),
         }
-    }
-}
-
-#[async_trait]
-trait ConnectionBuilder<C, S>
-where
-    C: Connection<S> {
-
-    async fn connect(self) -> Result<C, crate::Error>;
-}
-
-#[async_trait]
-impl<S> ConnectionBuilder<Mqtt, S> for MqttConfig
-where
-    S: PropertyStore {
-    async fn connect(self) -> Result<Mqtt, crate::Error> {
-        self.connect().await
     }
 }
 
@@ -250,17 +233,13 @@ where
         }
     }
 
-    pub async fn connect<C, B>(self, connection_builder: B) -> Result<(AstarteDeviceSdk<S, C>, EventReceiver), crate::Error>
-    where
-        C: Connection<S> + 'static,
-        B: ConnectionBuilder<C, S>,
-    {
-        let connection = connection_builder.connect().await?;
+    pub async fn connect_mqtt(self, mqtt_options: MqttConfig) -> Result<(AstarteDeviceSdk<S, Mqtt>, EventReceiver), crate::Error> {
+        let connection = mqtt_options.connect().await?;
 
         Ok(self.build(connection))
     }
 
-    pub fn build<C>(self, connection: C) -> (AstarteDeviceSdk<S, C>, EventReceiver)
+    pub(crate) fn build<C>(self, connection: C) -> (AstarteDeviceSdk<S, C>, EventReceiver)
     where
         C: Connection<S> + 'static,
     {

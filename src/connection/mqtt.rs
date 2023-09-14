@@ -49,9 +49,8 @@ impl Introspection {
         properties
             .into_iter()
             .filter(|prop| match interfaces.get_property(&prop.interface) {
-                Some(interface) =>
-                    interface.ownership() == Ownership::Device
-                        && interface.version_major() == prop.interface_major,
+                Some(interface) => interface.ownership() == Ownership::Device
+                    && interface.version_major() == prop.interface_major,
                 None => false,
             })
             .collect()
@@ -107,6 +106,7 @@ impl Mqtt {
     async fn connack<S>(&self, device: &SharedDevice<S>, connack: rumqttc::ConnAck) -> Result<(), crate::Error>
     where
         S: PropertyStore {
+
         if connack.session_present {
             return Ok(());
         }
@@ -155,7 +155,6 @@ impl Mqtt {
 
     async fn send_device_properties(&self, device_properties: &[StoredProp]) -> Result<(), crate::Error> {
         for prop in device_properties {
-			// TODO this should probably be moved inside the connection the part that sends a property over the connection
             let topic = format!("{}/{}{}", self.client_id(), prop.interface, prop.path);
 
             debug!(
@@ -282,7 +281,7 @@ where
                 debug!("Incoming publish = {} {:x}", publish.topic, bdata);
 
                 if cfg!(debug_assertions) {
-                    device.interfaces.read().await.validate_receive(&interface, &path, &bdata);
+                    device.interfaces.read().await.validate_receive(&interface, &path, &bdata)?;
                 }
 
                 let data= payload::deserialize(&bdata)?;
@@ -297,7 +296,7 @@ where
     }
 
 	async fn send<'a>(&self, device: &SharedDevice<S>, interface_name: &str,
-        interface_path: &str, payload: Self::SendPayload, timestamp: Option<DateTime<Utc>>) -> Result<(), Self::Err> {
+        interface_path: &MappingPath<'a>, payload: Self::SendPayload, timestamp: Option<DateTime<Utc>>) -> Result<(), Self::Err> {
         
         let ifaces_lock = device.interfaces.read().await;
 
@@ -318,7 +317,7 @@ where
         Ok(())
     }
 
-	fn serialize_individual(&self, data: &AstarteType, timestamp: Option<DateTime<Utc>>) -> Result<Self::SendPayload, Self::Err> {
+	fn serialize(&self, data: &AstarteType, timestamp: Option<DateTime<Utc>>) -> Result<Self::SendPayload, Self::Err> {
         let buf = payload::serialize_individual(&data, timestamp)?;
 
         Ok(buf)

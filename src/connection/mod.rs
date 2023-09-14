@@ -22,19 +22,9 @@ pub enum ReceivedEvent {
 	Data(AstarteDeviceDataEvent),
 }
 
-mod private {
-    use crate::interface::mapping::path::MappingPath;
-
-	#[async_trait]
-	pub trait ConnectionSender {
-		async fn send<'a>(&self, device: &SharedDevice<S>, interface_name: &str,
-        interface_path: &MappingPath<'a>, payload: Self::SendPayload, timestamp: Option<DateTime<Utc>>) -> Result<(), crate::Error/*Self::Err*/>;
-	}
-}
-
 #[async_trait]
-pub trait Connection<S>: private::ConnectionSender + Send + Sync + Clone {
-	type SendPayload;
+pub(crate) trait Connection<S>: Send + Sync + Clone {
+	type SendPayload: Send + Sync;
 	type Payload: Send + Sync;
 	type Err: std::fmt::Debug + Into<crate::Error>;
 //     type Payload
@@ -51,9 +41,9 @@ pub trait Connection<S>: private::ConnectionSender + Send + Sync + Clone {
 
 	// can't expose private traits so i need to pass in a str
 	async fn send<'a>(&self, device: &SharedDevice<S>, interface_name: &str,
-        interface_path: &str, payload: Self::SendPayload, timestamp: Option<DateTime<Utc>>) -> Result<(), crate::Error/*Self::Err*/>;
+        interface_path: &MappingPath<'a>, payload: Self::SendPayload, timestamp: Option<DateTime<Utc>>) -> Result<(), crate::Error/*Self::Err*/>;
 
-	fn serialize_individual(&self, data: &AstarteType, timestamp: Option<DateTime<Utc>>) -> Result<Self::SendPayload, crate::Error/*Self::Err*/>;
+	fn serialize(&self, data: &AstarteType, timestamp: Option<DateTime<Utc>>) -> Result<Self::SendPayload, crate::Error/*Self::Err*/>;
 
 	fn serialize_object(&self, data: &HashMap<String, AstarteType>, timestamp: Option<DateTime<Utc>>) -> Result<Self::SendPayload, crate::Error/*Self::Err*/>;
 }
@@ -65,6 +55,5 @@ pub(crate) trait Register {
 
 	async fn unsubscribe(&self, interface: &str) -> Result<(), crate::Error>;
 
-	// TODO FIXME i'm not sure this belongs here but for now this should work
 	async fn send_introspection(&self, introspection: String) -> Result<(), crate::Error>;
 }
