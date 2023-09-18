@@ -21,8 +21,9 @@
 use std::time::Duration;
 
 use log::{debug, error};
-use rumqttc::{Event, EventLoop};
+use rumqttc::{Event};
 
+use crate::connection::mqtt::EventLoop;
 use crate::error::Error;
 
 /// Iterator that yields a delay that will increase exponentially till the max,

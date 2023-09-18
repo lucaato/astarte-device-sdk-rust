@@ -3,8 +3,13 @@ use std::{collections::HashMap, ops::Deref, sync::Arc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use log::{debug, trace, error, info};
-use rumqttc::{AsyncClient, EventLoop, Event as MqttEvent, Packet, ConnAck, Publish};
+use rumqttc::{Event as MqttEvent, Packet, ConnAck, Publish};
 use tokio::sync::Mutex;
+
+#[cfg(test)]
+pub(crate) use crate::mock::{MockAsyncClient as AsyncClient, MockEventLoop as EventLoop};
+#[cfg(not(test))]
+pub(crate) use rumqttc::{AsyncClient, EventLoop};
 
 use crate::{store::{StoredProp, PropertyStore}, shared::SharedDevice, interface::{Ownership, mapping::path::MappingPath}, retry::DelaiedPoll, payload, EventSender, interfaces::Interfaces, topic::parse_topic, AstarteDeviceDataEvent, Interface, types::AstarteType};
 
@@ -217,13 +222,13 @@ where
 	type Payload = rumqttc::Publish;
 	type Err = crate::Error;
 
-	async fn connect(&self, device: &SharedDevice<S>) -> Result<(), Self::Err> {
-        debug!("Trying to connect");
+	//async fn connect(&self, device: &SharedDevice<S>) -> Result<(), Self::Err> {
+    //    debug!("Trying to connect");
 
-        let connack = self.poll_ack().await?;
+    //    let connack = self.poll_ack().await?;
 
-        self.connack(device, connack).await
-    }
+    //    self.connack(device, connack).await
+    //}
 
     /// Poll updates from mqtt, can be placed in a loop to receive data.
     ///
@@ -317,7 +322,7 @@ where
         Ok(())
     }
 
-	fn serialize(&self, data: &AstarteType, timestamp: Option<DateTime<Utc>>) -> Result<Self::SendPayload, Self::Err> {
+	fn serialize_individual(&self, data: &AstarteType, timestamp: Option<DateTime<Utc>>) -> Result<Self::SendPayload, Self::Err> {
         let buf = payload::serialize_individual(&data, timestamp)?;
 
         Ok(buf)
@@ -357,4 +362,97 @@ impl Register for Mqtt {
 			.await
             .map_err(crate::Error::from)
 	}
+}
+
+#[cfg(test)]
+mod test {
+    use std::str::FromStr;
+
+    use tokio::sync::{RwLock, mpsc};
+
+    use crate::{Interface, shared::SharedDevice, store::{memory::MemoryStore, wrapper::StoreWrapper}, interfaces::Interfaces};
+
+    use super::{EventLoop, AsyncClient, MqttEvent, Mqtt};
+
+    fn mock_mqtt_connection(client: AsyncClient, eventl: EventLoop) -> Mqtt {
+        Mqtt::new("realm".to_string(), "device_id".to_string(), eventl, client)
+    }
+
+    #[tokio::test]
+    async fn test_poll_server_connack() {
+        let mut eventl = EventLoop::default();
+        let client = AsyncClient::default();
+
+        eventl.expect_poll().once().returning(|| {
+            Ok(MqttEvent::Incoming(rumqttc::Packet::ConnAck(
+                rumqttc::ConnAck {
+                    session_present: false,
+                    code: rumqttc::ConnectReturnCode::Success,
+                },
+            )))
+        });
+
+        let mqtt_connection = mock_mqtt_connection(client, eventl);
+
+        let ack = mqtt_connection.poll_ack().await.expect("Error while receiving the connack");
+
+        assert_eq!(ack.session_present, false);
+        assert_eq!(ack.code, rumqttc::ConnectReturnCode::Success);
+    }
+
+    #[tokio::test]
+    async fn test_connack_client_response() {
+        let eventl = EventLoop::default();
+        let mut client = AsyncClient::default();
+
+        client
+            .expect_subscribe()
+            .once()
+            .returning(|_: String, _| Ok(()));
+
+        client
+            .expect_publish::<String, String>()
+            .returning(|topic, _, _, _| {
+                // Client id
+                assert_eq!(topic, "realm/device_id");
+
+                Ok(())
+            });
+
+        client
+            .expect_publish::<String, &str>()
+            .returning(|topic, _, _, payload| {
+                // empty cache
+                assert_eq!(topic, "realm/device_id/control/emptyCache");
+
+                assert_eq!(payload, "1");
+
+                Ok(())
+            });
+
+        client.expect_subscribe::<String>().returning(|topic, _qos| {
+            assert_eq!(topic, "realm/device_id/org.astarte-platform.rust.examples.individual-datastream.ServerDatastream/#");
+
+            Ok(())
+        });
+
+        let interfaces = [
+            Interface::from_str(crate::test::OBJECT_DEVICE_DATASTREAM).unwrap(),
+            Interface::from_str(crate::test::INDIVIDUAL_SERVER_DATASTREAM).unwrap(),
+        ];
+
+        let (tx, _rx) = mpsc::channel(2);
+
+        let mqtt_connection = mock_mqtt_connection(client, eventl);
+        let shared_device = SharedDevice {
+            interfaces: RwLock::new(Interfaces::from(interfaces).expect("Error while contructing Interfaces object")),
+            store: StoreWrapper{ store: MemoryStore::new() },
+            tx,
+        };
+
+        mqtt_connection.connack(&shared_device, rumqttc::ConnAck {
+                session_present: false,
+                code: rumqttc::ConnectReturnCode::Success,
+            }).await.unwrap();
+    }
 }

@@ -906,7 +906,7 @@ mod test {
 
     #[test]
     fn test_get_instrospection_string() {
-        let mut options = DeviceBuilder::new("test", "test", "test", "test");
+        let mut options = DeviceBuilder::new();
         options = options
             .interface_directory("examples/individual_datastream/interfaces")
             .expect("Failed to set interface directory");

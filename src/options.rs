@@ -24,20 +24,15 @@ use std::fmt::Debug;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex;
-
-use async_trait::async_trait;
-use bson::ser::Error;
 use log::debug;
 use pairing::PairingError;
-use rumqttc::AsyncClient;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
+use crate::connection::mqtt::AsyncClient;
 use crate::AstarteDeviceSdk;
 use crate::EventReceiver;
-use crate::EventSender;
 use crate::connection::Connection;
 use crate::connection::mqtt::Mqtt;
 use crate::crypto::CryptoError;
@@ -233,15 +228,15 @@ where
         }
     }
 
-    pub async fn connect_mqtt(self, mqtt_options: MqttConfig) -> Result<(AstarteDeviceSdk<S, Mqtt>, EventReceiver), crate::Error> {
-        let connection = mqtt_options.connect().await?;
+    pub async fn connect_mqtt(self, mqtt_config: MqttConfig) -> Result<(AstarteDeviceSdk<S, Mqtt>, EventReceiver), crate::Error> {
+        let connection = mqtt_config.connect().await?;
 
         Ok(self.build(connection))
     }
 
     pub(crate) fn build<C>(self, connection: C) -> (AstarteDeviceSdk<S, C>, EventReceiver)
     where
-        C: Connection<S> + 'static,
+        C: Connection<S>,
     {
         const MQTT_CHANNEL_SIZE: usize = 50;
 
@@ -327,14 +322,5 @@ mod test {
             "Failed to load interfaces from directory: {:?}",
             res
         );
-    }
-
-    #[test]
-    fn connect_mqtt() {
-        let builder = DeviceBuilder::new()
-            .interface_directory("examples/individual_datastream/interfaces");
-
-        let device = builder.unwrap()
-            .connect(MqttConfig::new("realm", "device_id", "sec", "pairing_url")).await;
     }
 }
