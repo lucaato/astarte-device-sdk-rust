@@ -1,25 +1,26 @@
 /*
 
- * This file is part of Astarte.
- *
- * Copyright 2021 SECO Mind Srl
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * SPDX-License-Identifier: Apache-2.0
- */
+* This file is part of Astarte.
+*
+* Copyright 2021 SECO Mind Srl
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*    http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*
+* SPDX-License-Identifier: Apache-2.0
+*/
 #![doc = include_str!("../README.md")]
 
+pub mod connection;
 pub mod crypto;
 pub mod error;
 pub mod interface;
@@ -33,13 +34,12 @@ pub mod properties;
 pub mod registration;
 mod retry;
 mod shared;
-pub mod connection;
 pub mod store;
 mod topic;
 pub mod types;
 
 use async_trait::async_trait;
-use connection::{Connection, Register};
+use connection::{Connection, Registry};
 use interfaces::Interfaces;
 use tokio::sync::{mpsc, RwLock};
 
@@ -54,7 +54,7 @@ use std::sync::Arc;
 pub use chrono;
 pub use rumqttc;
 
-use log::{debug, trace, error};
+use log::{debug, error, trace};
 
 /// Re-exported internal structs
 pub use crate::interface::Interface;
@@ -146,8 +146,8 @@ pub struct AstarteDeviceSdk<S, C> {
 /// trait since it's inside an [`Arc`].
 impl<S, C> Clone for AstarteDeviceSdk<S, C>
 where
-    C: Clone {
-
+    C: Clone,
+{
     fn clone(&self) -> Self {
         Self {
             connection: self.connection.clone(),
@@ -187,7 +187,7 @@ pub trait Device {
     /// Send an object datastreamy on an interface, with an explicit timestamp.
     ///
     /// ```no_run
-    /// # use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions, AstarteAggregate};
+    /// # use astarte_device_sdk::{AstarteDeviceSdk, Device, options::{DeviceBuilder, MqttConfig}, AstarteAggregate};
     /// #[cfg(not(feature = "derive"))]
     /// use astarte_device_sdk_derive::AstarteAggregate;
     /// use chrono::{TimeZone, Utc};
@@ -200,8 +200,11 @@ pub trait Device {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let mut sdk_options = AstarteOptions::new("_","_","_","_");
-    ///     let (mut device, _rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
+    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_")
+    ///         .ignore_ssl_errors();
+    ///
+    ///     let (mut device, _rx_events) = DeviceBuilder::new()
+    ///         .connect_mqtt(mqtt_config).await.unwrap();
     ///
     ///     let data = TestObject {
     ///         endpoint1: 1.34,
@@ -237,7 +240,6 @@ pub trait Device {
     where
         D: AstarteAggregate + Send;
 
-
     // ------------------------------------------------------------------------
     // individual types
     // ------------------------------------------------------------------------
@@ -245,13 +247,16 @@ pub trait Device {
     /// Send an individual datastream/property on an interface, with an explicit timestamp.
     ///
     /// ```no_run
-    /// use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions};
+    /// use astarte_device_sdk::{AstarteDeviceSdk, Device, options::{DeviceBuilder, MqttConfig}};
     /// use chrono::{TimeZone, Utc};
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let mut sdk_options = AstarteOptions::new("_","_","_","_");
-    ///     let (mut device, _rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
+    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_")
+    ///         .ignore_ssl_errors();
+    ///
+    ///     let (mut device, _rx_events) = DeviceBuilder::new()
+    ///         .connect_mqtt(mqtt_config).await.unwrap();
     ///
     ///     let value: i32 = 42;
     ///     let timestamp = Utc.timestamp_opt(1537449422, 0).unwrap();
@@ -284,17 +289,45 @@ pub trait Device {
     where
         D: TryInto<AstarteType> + Send;
 
+    /// Poll updates from the connection implementation, can be placed in a loop to receive data.
+    ///
+    /// This is a blocking function. It should be placed on a dedicated thread/task or as the main
+    /// thread.
+    ///
+    /// ```no_run
+    /// use astarte_device_sdk::{AstarteDeviceSdk, Device, options::{DeviceBuilder, MqttConfig}};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_")
+    ///         .ignore_ssl_errors();
+    ///
+    ///     let (mut device, mut rx_events) = DeviceBuilder::new()
+    ///         .connect_mqtt(mqtt_config).await.unwrap();
+    ///
+    ///     tokio::spawn(async move {
+    ///         while let Some(event) = rx_events.recv().await {
+    ///             assert!(event.is_ok());
+    ///         };
+    ///     });
+    ///
+    ///     device.handle_events().await;
+    /// }
+    /// ```
     async fn handle_events(&mut self) -> Result<(), crate::Error>;
 
     /// Unset a device property.
     ///
     /// ```no_run
-    /// use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions};
+    /// use astarte_device_sdk::{AstarteDeviceSdk, Device, options::{DeviceBuilder, MqttConfig}};
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let mut sdk_options = AstarteOptions::new("_","_","_","_");
-    ///     let (mut device, _rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
+    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_")
+    ///         .ignore_ssl_errors();
+    ///
+    ///     let (mut device, _rx_events) = DeviceBuilder::new()
+    ///         .connect_mqtt(mqtt_config).await.unwrap();
     ///
     ///     device
     ///         .unset("my.interface.name", "/endpoint/path",)
@@ -306,7 +339,7 @@ pub trait Device {
 }
 
 #[async_trait]
-pub trait InterfaceRegister {
+pub trait InterfaceRegistry {
     /// Add a new [`Interface`] to the device interfaces.
     async fn add_interface(&self, interface: Interface) -> Result<(), Error>;
 
@@ -322,12 +355,9 @@ pub trait InterfaceRegister {
 }
 
 #[async_trait]
-pub trait PropertyRegister {
-    async fn get_property(
-            &self,
-            interface: &str,
-            path: &str,
-        ) -> Result<Option<AstarteType>, Error>;
+pub trait PropertyRegistry {
+    async fn get_property(&self, interface: &str, path: &str)
+        -> Result<Option<AstarteType>, Error>;
 }
 
 #[async_trait]
@@ -378,7 +408,8 @@ where
     {
         let path = MappingPath::try_from(interface_path)?;
 
-        self.send_with_timestamp_impl(interface_name, &path, data, None).await
+        self.send_with_timestamp_impl(interface_name, &path, data, None)
+            .await
     }
 
     async fn send_with_timestamp<D>(
@@ -424,8 +455,7 @@ where
                 let data = device.handle_connection_event(event_payload).await;
 
                 if let Some(inner) = data.transpose() {
-                    device.tx.send(inner).await
-                        .expect("Channel dropped")
+                    device.tx.send(inner).await.expect("Channel dropped")
                 }
             });
         }
@@ -433,19 +463,22 @@ where
 }
 
 #[async_trait]
-impl<S, C> InterfaceRegister for AstarteDeviceSdk<S, C>
+impl<S, C> InterfaceRegistry for AstarteDeviceSdk<S, C>
 where
     S: PropertyStore,
-    C: Connection<S> + Register,
+    C: Connection<S> + Registry,
 {
     async fn add_interface(&self, interface: Interface) -> Result<(), Error> {
         if interface.ownership() == interface::Ownership::Server {
-            self.connection.subscribe(interface.interface_name())
+            self.connection
+                .subscribe(interface.interface_name())
                 .await?;
         }
 
         self.interfaces.write().await.add(interface)?;
-        self.connection.send_introspection(self.interfaces.read().await.get_introspection_string()).await?;
+        self.connection
+            .send_introspection(self.interfaces.read().await.get_introspection_string())
+            .await?;
 
         Ok(())
     }
@@ -456,7 +489,6 @@ where
 
         self.add_interface(interface).await
     }
-
     async fn add_interface_from_str(&self, json_str: &str) -> Result<(), Error> {
         let interface: Interface = Interface::from_str(json_str)?;
 
@@ -466,7 +498,9 @@ where
     async fn remove_interface(&self, interface_name: &str) -> Result<(), Error> {
         let interface = self.remove_interface_from_map(interface_name).await?;
         self.remove_properties_from_store(interface_name).await?;
-        self.connection.send_introspection(self.interfaces.read().await.get_introspection_string()).await?;
+        self.connection
+            .send_introspection(self.interfaces.read().await.get_introspection_string())
+            .await?;
 
         if interface.ownership() == interface::Ownership::Server {
             self.connection.unsubscribe(interface_name).await?;
@@ -477,7 +511,7 @@ where
 }
 
 #[async_trait]
-impl<S, C> PropertyRegister for AstarteDeviceSdk<S, C>
+impl<S, C> PropertyRegistry for AstarteDeviceSdk<S, C>
 where
     S: PropertyStore,
     C: Connection<S>,
@@ -494,32 +528,11 @@ where
 }
 
 impl<S, C> AstarteDeviceSdk<S, C> {
-    /// Create a new instance of the Astarte Device SDK.
-    ///
-    /// ```no_run
-    /// use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions};
-    ///
-    /// #[tokio::main]
-    /// fn main() {
-    ///     let sdk_options = AstarteOptions::new("", "", "", "")
-    ///     .interface_directory("")
-    ///     .unwrap()
-    ///     .ignore_ssl_errors();
-    ///
-    ///     let mut device = AstarteDeviceSdk::new(sdk_options).await.unwrap();
-    /// }
-    /// ```
-    pub(crate) fn new(
-        interfaces: Interfaces,
-        store: S,
-        connection: C,
-        tx: EventSender,
-    ) -> Self
+    pub(crate) fn new(interfaces: Interfaces, store: S, connection: C, tx: EventSender) -> Self
     where
         S: PropertyStore,
         C: Connection<S>,
     {
-
         Self {
             shared: Arc::new(SharedDevice {
                 interfaces: RwLock::new(interfaces),
@@ -558,12 +571,19 @@ impl<S, C> AstarteDeviceSdk<S, C> {
     }
 
     // I don't like the name maybe a better name for connection is actually transport like it was named
-    async fn handle_connection_event(&self, event_payload: <C as Connection<S>>::Payload) -> Result<Option<AstarteDeviceDataEvent>, crate::Error>
+    async fn handle_connection_event(
+        &self,
+        event_payload: <C as Connection<S>>::Payload,
+    ) -> Result<Option<AstarteDeviceDataEvent>, crate::Error>
     where
         S: PropertyStore,
         C: Connection<S>,
     {
-        match self.connection.handle_payload(&self, event_payload).await {
+        match self
+            .connection
+            .handle_payload(&self.shared, event_payload)
+            .await
+        {
             Ok(connection::ReceivedEvent::PurgeProperties(bdata)) => {
                 debug!("Purging properties");
                 self.purge_properties(&bdata).await?;
@@ -573,14 +593,15 @@ impl<S, C> AstarteDeviceSdk<S, C> {
             Ok(connection::ReceivedEvent::Data(data)) => {
                 let mapping_path = MappingPath::try_from(&data.path[..])?;
 
-                self.store_payload(&data.interface, &mapping_path, &data.data).await?;
+                self.store_payload(&data.interface, &mapping_path, &data.data)
+                    .await?;
 
                 Ok(Some(data))
-            },
+            }
             Err(err) => {
                 error!("error encountered while handling a received event: {err:#?}");
 
-                Err(err.into())
+                Err(err)
             }
         }
     }
@@ -642,7 +663,6 @@ impl<S, C> AstarteDeviceSdk<S, C> {
     where
         S: PropertyStore,
     {
-
         let major = self
             .interfaces
             .read()
@@ -747,7 +767,9 @@ impl<S, C> AstarteDeviceSdk<S, C> {
 
         let buf = self.connection.serialize_individual(&data, timestamp)?;
 
-        self.connection.send(&self.shared, interface_name, interface_path, buf, timestamp).await?;
+        self.connection
+            .send(&self.shared, interface_name, interface_path, buf, timestamp)
+            .await?;
 
         // we store the property in the database after it has been successfully sent
         if let Some(property) = opt_property {
@@ -773,15 +795,19 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         let aggregate = data.astarte_aggregate()?;
         let buf = self.connection.serialize_object(&aggregate, timestamp)?;
 
-        self.connection.send(&self.shared, interface_name, interface_path, buf, timestamp).await
+        self.connection
+            .send(&self.shared, interface_name, interface_path, buf, timestamp)
+            .await
     }
 
     async fn remove_interface_from_map(&self, interface_name: &str) -> Result<Interface, Error>
     where
         S: PropertyStore,
-        C: Connection<S> + Register,
+        C: Connection<S> + Registry,
     {
-        self.interfaces.write().await
+        self.interfaces
+            .write()
+            .await
             .remove(interface_name)
             .ok_or_else(|| {
                 Error::Interface(InterfaceError::InterfaceNotFound {
@@ -793,7 +819,7 @@ impl<S, C> AstarteDeviceSdk<S, C> {
     async fn remove_properties_from_store(&self, interface_name: &str) -> Result<(), Error>
     where
         S: PropertyStore,
-        C: Connection<S> + Register,
+        C: Connection<S> + Registry,
     {
         let interfaces = self.interfaces.read().await;
         let mappings = interfaces.get_property(interface_name);
@@ -826,15 +852,18 @@ mod test {
     use base64::Engine;
     use mockall::predicate;
     use rumqttc::Event;
-    use tokio::sync::mpsc;
     use std::collections::HashMap;
     use std::str::FromStr;
+    use tokio::sync::mpsc;
 
     use crate::connection::mqtt::Mqtt;
     use crate::interfaces::Interfaces;
     use crate::properties::tests::PROPERTIES_PAYLOAD;
     use crate::store::memory::MemoryStore;
-    use crate::{self as astarte_device_sdk, payload, EventReceiver, Interface, Device, PropertyRegister, InterfaceRegister};
+    use crate::{
+        self as astarte_device_sdk, payload, Device, EventReceiver, Interface, InterfaceRegistry,
+        PropertyRegistry,
+    };
     use astarte_device_sdk::AstarteAggregate;
     use astarte_device_sdk::{types::AstarteType, Aggregation, AstarteDeviceSdk};
     use astarte_device_sdk_derive::astarte_aggregate;
@@ -859,10 +888,17 @@ mod test {
     {
         let (tx, rx) = mpsc::channel(50);
 
-        let sdk = AstarteDeviceSdk::new(Interfaces::from(interfaces).unwrap(),
+        let sdk = AstarteDeviceSdk::new(
+            Interfaces::from(interfaces).unwrap(),
             MemoryStore::new(),
-            Mqtt::new("realm".to_string(), "device_id".to_string(), eventloop, client),
-            tx);
+            Mqtt::new(
+                "realm".to_string(),
+                "device_id".to_string(),
+                eventloop,
+                client,
+            ),
+            tx,
+        );
 
         (sdk, rx)
     }
@@ -1145,8 +1181,9 @@ mod test {
     async fn test_handle_event() {
         let mut client = AsyncClient::default();
 
-        client.expect_clone()
-            .once()
+        client
+            .expect_clone()
+            // number of calls not limited since the clone it is inside the loop
             .returning(|| AsyncClient::default());
 
         client
@@ -1298,8 +1335,9 @@ mod test {
     async fn test_receive_object() {
         let mut client = AsyncClient::default();
 
-        client.expect_clone()
-            .once()
+        client
+            .expect_clone()
+            // number of calls not limited since the clone it is inside the loop
             .returning(|| AsyncClient::default());
 
         let mut eventloope = EventLoop::default();

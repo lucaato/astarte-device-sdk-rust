@@ -30,9 +30,10 @@ use std::error::Error as StdError;
 
 use astarte_device_sdk::{
     store::sqlite::SqliteStore,
-    options::AstarteOptions,
+    options::{DeviceBuilder, MqttConfig},
     error::Error,
-    AstarteDeviceSdk
+    AstarteDeviceSdk,
+    Device,
 };
 
 async fn run_astarte_device() -> Result<(), Box<dyn StdError>> {
@@ -47,13 +48,16 @@ async fn run_astarte_device() -> Result<(), Box<dyn StdError>> {
     // 1. (optional) Initialize a database to store the properties
     let db = SqliteStore::new("sqlite::memory:").await?;
 
-    // 2. Initialize device options (the ".database(db)" is not needed if 1 was skipped)
-    let sdk_options = AstarteOptions::new(&realm, &device_id, &credentials_secret, &pairing_url)
+    // 2. Initialize device options and mqtt config (the ".database(db)" is not needed if 1 was skipped)
+    let mqtt_config = MqttConfig::new("_", "_", "_", "_")
+        .ignore_ssl_errors();
+    let device_builder = DeviceBuilder::new()
         .interface_directory("./examples/interfaces")?
         .store(db);
 
     // 3. Create the device instance
-    let (mut device, mut rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
+    let (mut device, mut rx_events) = device_builder
+        .connect_mqtt(mqtt_config).await.unwrap();
 
     // Publishing new values can be performed using the send and send_object functions.
 
@@ -75,7 +79,6 @@ async fn run_astarte_device() -> Result<(), Box<dyn StdError>> {
 
     let data = MyAggObj {endpoint1: 1.34, endpoint2: 22};
     device.send_object("interface.name", "/common/endpoint/path", data).await.unwrap();
-
 
     // Receive a server publish from the event channel
     tokio::spawn(async move {

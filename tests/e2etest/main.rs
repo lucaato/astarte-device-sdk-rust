@@ -129,13 +129,16 @@ async fn e2etest_impl() {
 
     let test_cfg = TestCfg::init().expect("Failed configuration initialization");
 
-    let mut mqtt_config = MqttConfig::new(&test_cfg.realm,
+    let mut mqtt_config = MqttConfig::new(
+        &test_cfg.realm,
         &test_cfg.device_id,
         &test_cfg.credentials_secret,
-        &test_cfg.pairing_url);
+        &test_cfg.pairing_url,
+    );
 
     let device_builder = DeviceBuilder::new()
-        .interface_directory(&test_cfg.interfaces_fld.to_string_lossy()).unwrap();
+        .interface_directory(&test_cfg.interfaces_fld.to_string_lossy())
+        .unwrap();
 
     // Ignore SSL for local testing
     if env::var("E2E_IGNORE_SSL").is_ok() {

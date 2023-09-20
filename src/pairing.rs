@@ -262,9 +262,7 @@ fn build_mqtt_opts(
 }
 
 /// Returns a MqttOptions struct that can be used to connect to the broker.
-pub(crate) async fn get_transport_config(
-    opts: &MqttConfig,
-) -> Result<MqttOptions, BuilderError> {
+pub(crate) async fn get_transport_config(opts: &MqttConfig) -> Result<MqttOptions, BuilderError> {
     let (certificate, private_key) = populate_credentials(opts).await?;
 
     let broker_url = populate_broker_url(opts).await?;

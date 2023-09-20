@@ -21,7 +21,7 @@
 use std::time::Duration;
 
 use log::{debug, error};
-use rumqttc::{Event};
+use rumqttc::Event;
 
 use crate::connection::mqtt::EventLoop;
 use crate::error::Error;

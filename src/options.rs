@@ -19,28 +19,28 @@
  */
 //! Provides functionality to configure an instance of the
 //! [AstarteDeviceSdk][crate::AstarteDeviceSdk].
+use log::debug;
+use pairing::PairingError;
+use serde::Deserialize;
+use serde::Serialize;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
-use log::debug;
-use pairing::PairingError;
-use serde::Deserialize;
-use serde::Serialize;
 use tokio::sync::mpsc;
 
 use crate::connection::mqtt::AsyncClient;
-use crate::AstarteDeviceSdk;
-use crate::EventReceiver;
-use crate::connection::Connection;
 use crate::connection::mqtt::Mqtt;
+use crate::connection::Connection;
 use crate::crypto::CryptoError;
 use crate::interface::{Interface, InterfaceError};
 use crate::interfaces::Interfaces;
 use crate::pairing;
 use crate::store::memory::MemoryStore;
 use crate::store::PropertyStore;
+use crate::AstarteDeviceSdk;
+use crate::EventReceiver;
 
 /// Astarte options error.
 ///
@@ -118,12 +118,23 @@ impl Debug for MqttConfig {
 }
 
 impl MqttConfig {
-    /// Create a new instance of the MqttOptions
-    pub fn new(realm: &str,
-        device_id: &str,
-        credentials_secret: &str,
-        pairing_url: &str) -> Self {
-
+    /// Create a new instance of MqttConfig
+    ///
+    /// ```no_run
+    /// use astarte_device_sdk::options::MqttConfig;
+    ///
+    /// #[tokio::main]
+    /// async fn main(){
+    ///     let realm = "realm_name";
+    ///     let device_id = "device_id";
+    ///     let credentials_secret = "device_credentials_secret";
+    ///     let pairing_url = "astarte_cluster_pairing_url";
+    ///
+    ///     let mut mqtt_options =
+    ///         MqttConfig::new(&realm, &device_id, &credentials_secret, &pairing_url);
+    /// }
+    /// ```
+    pub fn new(realm: &str, device_id: &str, credentials_secret: &str, pairing_url: &str) -> Self {
         Self {
             realm: realm.to_owned(),
             device_id: device_id.to_owned(),
@@ -162,13 +173,13 @@ impl MqttConfig {
     }
 }
 
-#[cfg(feature="message-hub-client")]
+#[cfg(feature = "message-hub-client")]
 #[derive(Serialize, Deserialize)]
 pub struct GrpcConfig {
     pub(crate) endpoint: String,
 }
 
-#[cfg(feature="message-hub-client")]
+#[cfg(feature = "message-hub-client")]
 impl GrpcOptions {
     pub fn new(endpoint: &str) -> Self {
         Self {
@@ -178,24 +189,17 @@ impl GrpcOptions {
 }
 
 impl DeviceBuilder<MemoryStore> {
-    // TODO rewrite example and comment
-    /// Create a new instance of the astarte options.
+    /// Create a new instance of the DeviceBuilder.
     ///
     /// ```no_run
-    /// use astarte_device_sdk::options::AstarteOptions;
+    /// use astarte_device_sdk::options::{DeviceBuilder, MqttConfig};
     ///
     /// #[tokio::main]
     /// async fn main(){
-    ///     let realm = "realm_name";
-    ///     let device_id = "device_id";
-    ///     let credentials_secret = "device_credentials_secret";
-    ///     let pairing_url = "astarte_cluster_pairing_url";
-    ///
-    ///     let mut sdk_options =
-    ///         AstarteOptions::new(&realm, &device_id, &credentials_secret, &pairing_url)
+    ///     let mut builder =
+    ///         DeviceBuilder::new()
     ///             .interface_directory("path/to/interfaces")
-    ///             .unwrap()
-    ///             .keepalive(std::time::Duration::from_secs(90));
+    ///             .unwrap();
     /// }
     /// ```
     pub fn new() -> DeviceBuilder<MemoryStore> {
@@ -203,6 +207,12 @@ impl DeviceBuilder<MemoryStore> {
             interfaces: Interfaces::new(),
             store: MemoryStore::new(),
         }
+    }
+}
+
+impl Default for DeviceBuilder<MemoryStore> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -228,7 +238,10 @@ where
         }
     }
 
-    pub async fn connect_mqtt(self, mqtt_config: MqttConfig) -> Result<(AstarteDeviceSdk<S, Mqtt>, EventReceiver), crate::Error> {
+    pub async fn connect_mqtt(
+        self,
+        mqtt_config: MqttConfig,
+    ) -> Result<(AstarteDeviceSdk<S, Mqtt>, EventReceiver), crate::Error> {
         let connection = mqtt_config.connect().await?;
 
         Ok(self.build(connection))
@@ -242,7 +255,10 @@ where
 
         let (tx, rx) = mpsc::channel(MQTT_CHANNEL_SIZE);
 
-        (AstarteDeviceSdk::new(self.interfaces, self.store, connection, tx), rx)
+        (
+            AstarteDeviceSdk::new(self.interfaces, self.store, connection, tx),
+            rx,
+        )
     }
 }
 
@@ -296,12 +312,12 @@ fn walk_dir_json<P: AsRef<Path>>(path: P) -> Result<Vec<PathBuf>, io::Error> {
 
 #[cfg(test)]
 mod test {
-    use super::{DeviceBuilder, MqttConfig};
+    use super::DeviceBuilder;
 
     #[test]
     fn interface_directory() {
-        let res = DeviceBuilder::new()
-            .interface_directory("examples/individual_datastream/interfaces");
+        let res =
+            DeviceBuilder::new().interface_directory("examples/individual_datastream/interfaces");
 
         assert!(
             res.is_ok(),

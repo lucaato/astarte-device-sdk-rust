@@ -18,7 +18,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use astarte_device_sdk::{error::Error, options::{DeviceBuilder, MqttConfig}, AstarteAggregate, Device};
+use astarte_device_sdk::{
+    error::Error,
+    options::{DeviceBuilder, MqttConfig},
+    AstarteAggregate, Device,
+};
 #[cfg(not(feature = "derive"))]
 use astarte_device_sdk_derive::AstarteAggregate;
 
@@ -47,15 +51,19 @@ async fn main() -> Result<(), Error> {
     let file = std::fs::read_to_string("./examples/object_datastream/configuration.json").unwrap();
     let cfg: Config = serde_json::from_str(&file).unwrap();
 
-    let mqtt_config = MqttConfig::new(&cfg.realm,
+    let mqtt_config = MqttConfig::new(
+        &cfg.realm,
         &cfg.device_id,
         &cfg.credentials_secret,
-        &cfg.pairing_url).ignore_ssl_errors();
+        &cfg.pairing_url,
+    )
+    .ignore_ssl_errors();
 
     // Create an Astarte Device (also performs the connection)
     let (mut device, _rx) = DeviceBuilder::new()
         .interface_directory("./examples/object_datastream/interfaces")?
-        .connect_mqtt(mqtt_config).await?;
+        .connect_mqtt(mqtt_config)
+        .await?;
 
     // Create an thread to transmit
     let device_cpy = device.clone();
@@ -68,13 +76,14 @@ async fn main() -> Result<(), Error> {
             };
 
             println!("Sending {data:?}");
-            device_cpy.send_object(
-                "org.astarte-platform.rust.examples.object-datastream.DeviceDatastream",
-                "/23",
-                data,
-            )
-            .await
-            .unwrap();
+            device_cpy
+                .send_object(
+                    "org.astarte-platform.rust.examples.object-datastream.DeviceDatastream",
+                    "/23",
+                    data,
+                )
+                .await
+                .unwrap();
 
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
