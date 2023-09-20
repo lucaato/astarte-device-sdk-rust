@@ -448,10 +448,12 @@ where
 
     async fn handle_events(&mut self) -> Result<(), crate::Error> {
         loop {
+            // TODO manage the purge properties directly in the connection without returning an option
             let event_payload = self.connection.next_event(&self.shared).await?;
             let device = self.clone();
 
             tokio::spawn(async move {
+                // TODO since the code to handle the purge properties gets moved in the current thread (in next_event) i can just directly call handle payload
                 let data = device.handle_connection_event(event_payload).await;
 
                 if let Some(inner) = data.transpose() {
@@ -573,7 +575,7 @@ impl<S, C> AstarteDeviceSdk<S, C> {
     // I don't like the name maybe a better name for connection is actually transport like it was named
     async fn handle_connection_event(
         &self,
-        event_payload: <C as Connection<S>>::Payload,
+        event_payload: C::Payload,
     ) -> Result<Option<AstarteDeviceDataEvent>, crate::Error>
     where
         S: PropertyStore,

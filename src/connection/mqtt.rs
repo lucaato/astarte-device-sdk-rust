@@ -86,9 +86,6 @@ impl Introspection {
             .collect()
     }
 
-    // TODO function to generically filter stuff from Ownership
-    //fn filter_server_interfaces(interfaces)
-
     async fn from_device<S>(
         device: &SharedDevice<S>,
     ) -> Result<Self, crate::store::error::StoreError>
@@ -128,8 +125,6 @@ impl Mqtt {
 
     fn client_id(&self) -> String {
         format!("{}/{}", self.realm, self.device_id)
-        // TODO use format args
-        // format_args!();
     }
 
     async fn connack<S>(

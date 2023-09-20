@@ -35,7 +35,6 @@ pub(crate) struct DelaiedPoll {
     base: u32,
 }
 
-// TODO this should get generalized if needed on other connection types or it can be used only for mqtt connection
 impl DelaiedPoll {
     /// Retry to pool the connection after an error occurred
     pub(crate) async fn retry_poll_event(eventloop: &mut EventLoop) -> Result<Event, Error> {
