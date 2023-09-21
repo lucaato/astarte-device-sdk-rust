@@ -1,9 +1,10 @@
 use std::{collections::HashMap, ops::Deref, sync::Arc};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use log::{debug, error, info, trace};
-use rumqttc::{Event as MqttEvent, Packet, Publish};
+use rumqttc::{Event as MqttEvent, Packet};
 use tokio::sync::Mutex;
 
 #[cfg(test)]
@@ -20,10 +21,10 @@ use crate::{
     store::{PropertyStore, StoredProp},
     topic::parse_topic,
     types::AstarteType,
-    AstarteDeviceDataEvent,
+    AstarteDeviceDataEvent, properties,
 };
 
-use super::{Connection, ReceivedEvent, Registry};
+use super::{Connection, Registry};
 
 pub struct SharedMqtt {
     realm: String,
@@ -210,6 +211,27 @@ impl Mqtt {
         Ok(())
     }
 
+    async fn purge_properties<S>(&self, device: &SharedDevice<S>, bdata: &[u8]) -> Result<(), crate::Error>
+    where
+        S: PropertyStore,
+    {
+        let stored_props = device.store.load_all_props().await?;
+
+        let paths = properties::extract_set_properties(bdata)?;
+
+        for stored_prop in stored_props {
+            if paths.contains(&format!("{}{}", stored_prop.interface, stored_prop.path)) {
+                continue;
+            }
+
+            device.store
+                .delete_prop(&stored_prop.interface, &stored_prop.path)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     // i renamed it to include mqtt to avoid confunsion with the next_event these are different kind of events
     async fn poll_mqtt_event(&self) -> Result<MqttEvent, crate::Error> {
         let mut lock = self.eventloop.lock().await;
@@ -239,18 +261,37 @@ impl<S> Connection<S> for Mqtt
 where
     S: PropertyStore,
 {
+    // TODO could we introduce a type even for the "topic" format so that we could use a MappingPath and pass it around currently we can't return a mapping path from a connection since it borrows data from the topic
     type SendPayload = Vec<u8>;
-    type Payload = rumqttc::Publish;
+    type Payload = Bytes;
     type Err = crate::Error;
 
-    async fn next_event(&self, device: &SharedDevice<S>) -> Result<Self::Payload, crate::Error> {
+    async fn next_event(&self, device: &SharedDevice<S>) -> Result<(String, String, Self::Payload), crate::Error> {
+        // Keep consuming packets until we have an actual "data" event
         loop {
-            let packet = self.poll().await?;
-
-            // Keep consuming and processing packets until we have data for the user
-            match packet {
+            match self.poll().await? {
                 rumqttc::Packet::ConnAck(connack) => self.connack(device, connack).await?,
-                rumqttc::Packet::Publish(publish) => return Ok(publish),
+                rumqttc::Packet::Publish(publish) => {
+                    let (_, _, interface, path) = parse_topic(&publish.topic)?;
+
+                    debug!("Incoming publish = {} {:x}", publish.topic, publish.payload);
+                    
+                    match (interface, path.as_str()) {
+                        ("control", "/consumer/properties") => {
+                            debug!("Purging properties");
+
+                            // TODO currently the purge properties is connection implementation specific but it could be moved back into the device by readding an enum
+                            self.purge_properties(device, &publish.payload).await?;
+                        }
+                        _ => {
+                            return Ok((
+                                interface.to_string(),
+                                path.to_string(),
+                                publish.payload,
+                            ));
+                        }
+                    }
+                },
                 _ => {}
             }
         }
@@ -260,42 +301,24 @@ where
     async fn handle_payload(
         &self,
         device: &SharedDevice<S>,
-        publish: Publish,
-    ) -> Result<ReceivedEvent, crate::Error> {
-        let (_, _, interface, path) = parse_topic(&publish.topic)?;
+        (interface, path, bdata): (String, &MappingPath<'_>, Self::Payload),
+    ) -> Result<AstarteDeviceDataEvent, crate::Error> {
 
-        debug!("received publish for interface \"{interface}\" and path \"{path}\"");
-
-        // It can be borrowed as a &[u8]
-        let bdata = publish.payload;
-
-        // FIXME If the ReceivedEvent enum is ultimately not needed we could just return an option to allow to handle only "data" events (since the purge properties is non needed for grpc i think this shouod be the case)
-        match (interface, path.as_str()) {
-            ("control", "/consumer/properties") => {
-                debug!("Purging properties");
-
-                Ok(ReceivedEvent::PurgeProperties(bdata))
-            }
-            _ => {
-                debug!("Incoming publish = {} {:x}", publish.topic, bdata);
-
-                if cfg!(debug_assertions) {
-                    device
-                        .interfaces
-                        .read()
-                        .await
-                        .validate_receive(interface, &path, &bdata)?;
-                }
-
-                let data = payload::deserialize(&bdata)?;
-
-                Ok(ReceivedEvent::Data(AstarteDeviceDataEvent {
-                    interface: interface.to_string(),
-                    path: path.to_string(),
-                    data,
-                }))
-            }
+        if cfg!(debug_assertions) {
+            device
+                .interfaces
+                .read()
+                .await
+                .validate_receive(interface.as_str(), path, &bdata)?;
         }
+
+        let data = payload::deserialize(&bdata)?;
+
+        Ok(AstarteDeviceDataEvent {
+            interface: interface.to_string(),
+            path: path.to_string(),
+            data,
+        })
     }
 
     async fn send<'a>(

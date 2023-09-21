@@ -1,7 +1,6 @@
 use std::{collections::HashMap, error::Error as StdError};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
 
 use crate::{
@@ -17,10 +16,7 @@ pub mod mqtt;
 //
 //}
 
-pub enum ReceivedEvent {
-    PurgeProperties(Bytes),
-    Data(AstarteDeviceDataEvent),
-}
+
 
 #[async_trait]
 pub(crate) trait Connection<S>: Send + Sync + Clone + 'static
@@ -36,13 +32,13 @@ where
     async fn next_event(
         &self,
         device: &SharedDevice<S>,
-    ) -> Result<Self::Payload, crate::Error /*Self::Err*/>;
+    ) -> Result<(String, String, Self::Payload), crate::Error /*Self::Err*/>;
 
     async fn handle_payload(
         &self,
         device: &SharedDevice<S>,
-        payload: Self::Payload,
-    ) -> Result<ReceivedEvent, crate::Error /*Self::Err*/>;
+        payload: (String, &MappingPath<'_>, Self::Payload),
+    ) -> Result<AstarteDeviceDataEvent, crate::Error /*Self::Err*/>;
 
     async fn send<'a>(
         &self,

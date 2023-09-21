@@ -54,7 +54,7 @@ use std::sync::Arc;
 pub use chrono;
 pub use rumqttc;
 
-use log::{debug, error, trace};
+use log::{debug, trace};
 
 /// Re-exported internal structs
 pub use crate::interface::Interface;
@@ -448,17 +448,13 @@ where
 
     async fn handle_events(&mut self) -> Result<(), crate::Error> {
         loop {
-            // TODO manage the purge properties directly in the connection without returning an option
-            let event_payload = self.connection.next_event(&self.shared).await?;
+            let (interface, path, event_payload) = self.connection.next_event(&self.shared).await?;
             let device = self.clone();
 
             tokio::spawn(async move {
-                // TODO since the code to handle the purge properties gets moved in the current thread (in next_event) i can just directly call handle payload
-                let data = device.handle_connection_event(event_payload).await;
+                let data = device.handle_connection_payload(interface, path, event_payload).await;
 
-                if let Some(inner) = data.transpose() {
-                    device.tx.send(inner).await.expect("Channel dropped")
-                }
+                device.tx.send(data).await.expect("Channel dropped")
             });
         }
     }
@@ -491,6 +487,7 @@ where
 
         self.add_interface(interface).await
     }
+
     async fn add_interface_from_str(&self, json_str: &str) -> Result<(), Error> {
         let interface: Interface = Interface::from_str(json_str)?;
 
@@ -545,6 +542,21 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         }
     }
 
+    async fn handle_connection_payload(&self, interface: String, path: String, connection_payload: C::Payload) -> Result<AstarteDeviceDataEvent, crate::Error>
+    where
+        S: PropertyStore,
+        C: Connection<S>,
+    {
+        let mapping_path = MappingPath::try_from(path.as_str())?;
+
+        let data = self.connection.handle_payload(&self.shared, (interface, &mapping_path, connection_payload)).await?;
+
+        self.store_payload(data.interface.as_str(), &mapping_path, &data.data)
+            .await?;
+
+        Ok(data)
+    }
+
     /// Handles a payload received from a connection.
     async fn store_payload<'a>(
         &self,
@@ -572,42 +584,6 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         }
     }
 
-    // I don't like the name maybe a better name for connection is actually transport like it was named
-    async fn handle_connection_event(
-        &self,
-        event_payload: C::Payload,
-    ) -> Result<Option<AstarteDeviceDataEvent>, crate::Error>
-    where
-        S: PropertyStore,
-        C: Connection<S>,
-    {
-        match self
-            .connection
-            .handle_payload(&self.shared, event_payload)
-            .await
-        {
-            Ok(connection::ReceivedEvent::PurgeProperties(bdata)) => {
-                debug!("Purging properties");
-                self.purge_properties(&bdata).await?;
-
-                Ok(None)
-            }
-            Ok(connection::ReceivedEvent::Data(data)) => {
-                let mapping_path = MappingPath::try_from(&data.path[..])?;
-
-                self.store_payload(&data.interface, &mapping_path, &data.data)
-                    .await?;
-
-                Ok(Some(data))
-            }
-            Err(err) => {
-                error!("error encountered while handling a received event: {err:#?}");
-
-                Err(err)
-            }
-        }
-    }
-
     /// Store the property.
     async fn store_property<'a>(
         &self,
@@ -629,27 +605,6 @@ impl<S, C> AstarteDeviceSdk<S, C> {
             .await?;
 
         trace!("property stored");
-
-        Ok(())
-    }
-
-    async fn purge_properties(&self, bdata: &[u8]) -> Result<(), Error>
-    where
-        S: PropertyStore,
-    {
-        let stored_props = self.store.load_all_props().await?;
-
-        let paths = properties::extract_set_properties(bdata)?;
-
-        for stored_prop in stored_props {
-            if paths.contains(&format!("{}{}", stored_prop.interface, stored_prop.path)) {
-                continue;
-            }
-
-            self.store
-                .delete_prop(&stored_prop.interface, &stored_prop.path)
-                .await?;
-        }
 
         Ok(())
     }
