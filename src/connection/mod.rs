@@ -16,8 +16,6 @@ pub mod mqtt;
 //
 //}
 
-
-
 #[async_trait]
 pub(crate) trait Connection<S>: Send + Sync + Clone + 'static
 where

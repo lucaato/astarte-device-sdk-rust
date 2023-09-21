@@ -15,13 +15,13 @@ pub(crate) use rumqttc::{AsyncClient, EventLoop};
 use crate::{
     interface::{mapping::path::MappingPath, Ownership},
     interfaces::Interfaces,
-    payload,
+    payload, properties,
     retry::DelaiedPoll,
     shared::SharedDevice,
     store::{PropertyStore, StoredProp},
     topic::parse_topic,
     types::AstarteType,
-    AstarteDeviceDataEvent, properties,
+    AstarteDeviceDataEvent,
 };
 
 use super::{Connection, Registry};
@@ -211,7 +211,11 @@ impl Mqtt {
         Ok(())
     }
 
-    async fn purge_properties<S>(&self, device: &SharedDevice<S>, bdata: &[u8]) -> Result<(), crate::Error>
+    async fn purge_properties<S>(
+        &self,
+        device: &SharedDevice<S>,
+        bdata: &[u8],
+    ) -> Result<(), crate::Error>
     where
         S: PropertyStore,
     {
@@ -224,7 +228,8 @@ impl Mqtt {
                 continue;
             }
 
-            device.store
+            device
+                .store
                 .delete_prop(&stored_prop.interface, &stored_prop.path)
                 .await?;
         }
@@ -266,7 +271,10 @@ where
     type Payload = Bytes;
     type Err = crate::Error;
 
-    async fn next_event(&self, device: &SharedDevice<S>) -> Result<(String, String, Self::Payload), crate::Error> {
+    async fn next_event(
+        &self,
+        device: &SharedDevice<S>,
+    ) -> Result<(String, String, Self::Payload), crate::Error> {
         // Keep consuming packets until we have an actual "data" event
         loop {
             match self.poll().await? {
@@ -275,7 +283,7 @@ where
                     let (_, _, interface, path) = parse_topic(&publish.topic)?;
 
                     debug!("Incoming publish = {} {:x}", publish.topic, publish.payload);
-                    
+
                     match (interface, path.as_str()) {
                         ("control", "/consumer/properties") => {
                             debug!("Purging properties");
@@ -284,14 +292,10 @@ where
                             self.purge_properties(device, &publish.payload).await?;
                         }
                         _ => {
-                            return Ok((
-                                interface.to_string(),
-                                path.to_string(),
-                                publish.payload,
-                            ));
+                            return Ok((interface.to_string(), path.to_string(), publish.payload));
                         }
                     }
-                },
+                }
                 _ => {}
             }
         }
@@ -303,7 +307,6 @@ where
         device: &SharedDevice<S>,
         (interface, path, bdata): (String, &MappingPath<'_>, Self::Payload),
     ) -> Result<AstarteDeviceDataEvent, crate::Error> {
-
         if cfg!(debug_assertions) {
             device
                 .interfaces

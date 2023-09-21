@@ -452,7 +452,9 @@ where
             let device = self.clone();
 
             tokio::spawn(async move {
-                let data = device.handle_connection_payload(interface, path, event_payload).await;
+                let data = device
+                    .handle_connection_payload(interface, path, event_payload)
+                    .await;
 
                 device.tx.send(data).await.expect("Channel dropped")
             });
@@ -542,14 +544,22 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         }
     }
 
-    async fn handle_connection_payload(&self, interface: String, path: String, connection_payload: C::Payload) -> Result<AstarteDeviceDataEvent, crate::Error>
+    async fn handle_connection_payload(
+        &self,
+        interface: String,
+        path: String,
+        connection_payload: C::Payload,
+    ) -> Result<AstarteDeviceDataEvent, crate::Error>
     where
         S: PropertyStore,
         C: Connection<S>,
     {
         let mapping_path = MappingPath::try_from(path.as_str())?;
 
-        let data = self.connection.handle_payload(&self.shared, (interface, &mapping_path, connection_payload)).await?;
+        let data = self
+            .connection
+            .handle_payload(&self.shared, (interface, &mapping_path, connection_payload))
+            .await?;
 
         self.store_payload(data.interface.as_str(), &mapping_path, &data.data)
             .await?;
