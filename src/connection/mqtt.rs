@@ -266,7 +266,6 @@ impl<S> Connection<S> for Mqtt
 where
     S: PropertyStore,
 {
-    // TODO could we introduce a type even for the "topic" format so that we could use a MappingPath and pass it around currently we can't return a mapping path from a connection since it borrows data from the topic
     type SendPayload = Vec<u8>;
     type Payload = Bytes;
     type Err = crate::Error;
@@ -288,7 +287,6 @@ where
                         ("control", "/consumer/properties") => {
                             debug!("Purging properties");
 
-                            // TODO currently the purge properties is connection implementation specific but it could be moved back into the device by readding an enum
                             self.purge_properties(device, &publish.payload).await?;
                         }
                         _ => {
