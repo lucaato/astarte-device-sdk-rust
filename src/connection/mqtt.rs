@@ -1,10 +1,10 @@
-use std::{collections::HashMap, ops::Deref, sync::Arc};
+use std::{collections::HashMap, fmt::Display, ops::Deref, sync::Arc};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use log::{debug, error, info, trace};
-use rumqttc::{Event as MqttEvent, Packet};
+use once_cell::sync::OnceCell;
+use rumqttc::{Event as MqttEvent, Packet, Publish};
 use tokio::sync::Mutex;
 
 #[cfg(test)]
@@ -107,6 +107,18 @@ impl Introspection {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ClientId<'a> {
+    realm: &'a str,
+    device_id: &'a str,
+}
+
+impl<'a> Display for ClientId<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.realm, self.device_id)
+    }
+}
+
 impl Mqtt {
     pub(crate) fn new(
         realm: String,
@@ -124,8 +136,11 @@ impl Mqtt {
         }
     }
 
-    fn client_id(&self) -> String {
-        format!("{}/{}", self.realm, self.device_id)
+    fn client_id(&self) -> ClientId {
+        ClientId {
+            realm: &self.realm,
+            device_id: &self.device_id,
+        }
     }
 
     async fn connack<S>(
@@ -161,7 +176,7 @@ impl Mqtt {
     ) -> Result<(), crate::Error> {
         self.client
             .subscribe(
-                self.client_id() + "/control/consumer/properties",
+                format!("{}/control/consumer/properties", self.client_id()),
                 rumqttc::QoS::ExactlyOnce,
             )
             .await?;
@@ -169,7 +184,7 @@ impl Mqtt {
         for iface in server_interfaces {
             self.client
                 .subscribe(
-                    self.client_id() + "/" + iface + "/#",
+                    format!("{}/{iface}/#", self.client_id()),
                     rumqttc::QoS::ExactlyOnce,
                 )
                 .await?;
@@ -179,7 +194,7 @@ impl Mqtt {
     }
 
     async fn send_emptycache(&self) -> Result<(), crate::Error> {
-        let url = self.client_id() + "/control/emptyCache";
+        let url = format!("{}/control/emptyCache", self.client_id());
         debug!("sending emptyCache to {}", url);
 
         self.client
@@ -237,7 +252,6 @@ impl Mqtt {
         Ok(())
     }
 
-    // i renamed it to include mqtt to avoid confunsion with the next_event these are different kind of events
     async fn poll_mqtt_event(&self) -> Result<MqttEvent, crate::Error> {
         let mut lock = self.eventloop.lock().await;
 
@@ -267,31 +281,27 @@ where
     S: PropertyStore,
 {
     type SendPayload = Vec<u8>;
-    type Payload = Bytes;
-    type Err = crate::Error;
+    type Payload = Publish;
 
-    async fn next_event(
-        &self,
-        device: &SharedDevice<S>,
-    ) -> Result<(String, String, Self::Payload), crate::Error> {
+    async fn next_event(&self, device: &SharedDevice<S>) -> Result<Self::Payload, crate::Error> {
+        static PURGE_PROPERTIES_TOPIC: OnceCell<String> = OnceCell::new();
+
         // Keep consuming packets until we have an actual "data" event
         loop {
             match self.poll().await? {
                 rumqttc::Packet::ConnAck(connack) => self.connack(device, connack).await?,
                 rumqttc::Packet::Publish(publish) => {
-                    let (_, _, interface, path) = parse_topic(&publish.topic)?;
+                    let purge_topic = PURGE_PROPERTIES_TOPIC.get_or_init(|| {
+                        format!("{}/control/consumer/properties", self.client_id())
+                    });
 
                     debug!("Incoming publish = {} {:x}", publish.topic, publish.payload);
 
-                    match (interface, path.as_str()) {
-                        ("control", "/consumer/properties") => {
-                            debug!("Purging properties");
-
-                            self.purge_properties(device, &publish.payload).await?;
-                        }
-                        _ => {
-                            return Ok((interface.to_string(), path.to_string(), publish.payload));
-                        }
+                    if purge_topic == &publish.topic {
+                        debug!("Purging properties");
+                        self.purge_properties(device, &publish.payload).await?;
+                    } else {
+                        return Ok(publish);
                     }
                 }
                 _ => {}
@@ -303,14 +313,17 @@ where
     async fn handle_payload(
         &self,
         device: &SharedDevice<S>,
-        (interface, path, bdata): (String, &MappingPath<'_>, Self::Payload),
+        publish: Self::Payload,
     ) -> Result<AstarteDeviceDataEvent, crate::Error> {
+        let (_, _, interface, path) = parse_topic(&publish.topic)?;
+        let bdata = publish.payload;
+
         if cfg!(debug_assertions) {
             device
                 .interfaces
                 .read()
                 .await
-                .validate_receive(interface.as_str(), path, &bdata)?;
+                .validate_receive(interface, &path, &bdata)?;
         }
 
         let data = payload::deserialize(&bdata)?;
@@ -329,7 +342,7 @@ where
         interface_path: &MappingPath<'a>,
         payload: Self::SendPayload,
         timestamp: Option<DateTime<Utc>>,
-    ) -> Result<(), Self::Err> {
+    ) -> Result<(), crate::Error> {
         let ifaces_lock = device.interfaces.read().await;
 
         if cfg!(debug_assertions) {
@@ -340,7 +353,12 @@ where
 
         self.client
             .publish(
-                self.client_id() + "/" + interface_name.trim_matches('/') + interface_path.as_str(),
+                format!(
+                    "{}/{}{}",
+                    self.client_id(),
+                    interface_name.trim_matches('/'),
+                    interface_path
+                ),
                 qos,
                 false,
                 payload,
@@ -354,7 +372,7 @@ where
         &self,
         data: &AstarteType,
         timestamp: Option<DateTime<Utc>>,
-    ) -> Result<Self::SendPayload, Self::Err> {
+    ) -> Result<Self::SendPayload, crate::Error> {
         let buf = payload::serialize_individual(data, timestamp)?;
 
         Ok(buf)
@@ -364,7 +382,7 @@ where
         &self,
         data: &HashMap<String, AstarteType>,
         timestamp: Option<DateTime<Utc>>,
-    ) -> Result<Self::SendPayload, Self::Err> {
+    ) -> Result<Self::SendPayload, crate::Error> {
         let buf = payload::serialize_object(data, timestamp)?;
 
         Ok(buf)
@@ -376,7 +394,7 @@ impl Registry for Mqtt {
     async fn subscribe(&self, interface_name: &str) -> Result<(), crate::Error> {
         self.client
             .subscribe(
-                self.client_id() + "/" + interface_name + "/#",
+                format!("{}/{interface_name}/#", self.client_id()),
                 rumqttc::QoS::ExactlyOnce,
             )
             .await
@@ -385,7 +403,7 @@ impl Registry for Mqtt {
 
     async fn unsubscribe(&self, interface_name: &str) -> Result<(), crate::Error> {
         self.client
-            .unsubscribe(self.client_id() + "/" + interface_name + "/#")
+            .unsubscribe(format!("{}/{interface_name}/#", self.client_id()))
             .await
             .map_err(crate::Error::from)
     }
@@ -393,13 +411,10 @@ impl Registry for Mqtt {
     async fn send_introspection(&self, introspection: String) -> Result<(), crate::Error> {
         debug!("sending introspection = {}", introspection);
 
+        let path = self.client_id().to_string();
+
         self.client
-            .publish(
-                self.client_id(),
-                rumqttc::QoS::ExactlyOnce,
-                false,
-                introspection,
-            )
+            .publish(path, rumqttc::QoS::ExactlyOnce, false, introspection)
             .await
             .map_err(crate::Error::from)
     }

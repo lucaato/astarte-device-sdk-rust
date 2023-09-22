@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error as StdError};
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -9,34 +9,19 @@ use crate::{
 };
 
 pub mod mqtt;
-//#[cfg(feature)]
-//pub mod grpc;
-
-//enum ConnectionError<E> {
-//
-//}
 
 #[async_trait]
-pub(crate) trait Connection<S>: Send + Sync + Clone + 'static
-where
-    Self::SendPayload: Send + Sync + 'static,
-    Self::Payload: Send + Sync + 'static,
-    Self::Err: StdError + Send + Sync + 'static,
-{
-    type SendPayload;
-    type Payload;
-    type Err;
+pub(crate) trait Connection<S>: Send + Sync + Clone + 'static {
+    type SendPayload: Send + Sync;
+    type Payload: Send + Sync + 'static;
 
-    async fn next_event(
-        &self,
-        device: &SharedDevice<S>,
-    ) -> Result<(String, String, Self::Payload), crate::Error /*Self::Err*/>;
+    async fn next_event(&self, device: &SharedDevice<S>) -> Result<Self::Payload, crate::Error>;
 
     async fn handle_payload(
         &self,
         device: &SharedDevice<S>,
-        payload: (String, &MappingPath<'_>, Self::Payload),
-    ) -> Result<AstarteDeviceDataEvent, crate::Error /*Self::Err*/>;
+        payload: Self::Payload,
+    ) -> Result<AstarteDeviceDataEvent, crate::Error>;
 
     async fn send<'a>(
         &self,
@@ -45,19 +30,19 @@ where
         interface_path: &MappingPath<'a>,
         payload: Self::SendPayload,
         timestamp: Option<DateTime<Utc>>,
-    ) -> Result<(), crate::Error /*Self::Err*/>;
+    ) -> Result<(), crate::Error>;
 
     fn serialize_individual(
         &self,
         data: &AstarteType,
         timestamp: Option<DateTime<Utc>>,
-    ) -> Result<Self::SendPayload, crate::Error /*Self::Err*/>;
+    ) -> Result<Self::SendPayload, crate::Error>;
 
     fn serialize_object(
         &self,
         data: &HashMap<String, AstarteType>,
         timestamp: Option<DateTime<Utc>>,
-    ) -> Result<Self::SendPayload, crate::Error /*Self::Err*/>;
+    ) -> Result<Self::SendPayload, crate::Error>;
 }
 
 #[async_trait]

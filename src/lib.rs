@@ -448,13 +448,11 @@ where
 
     async fn handle_events(&mut self) -> Result<(), crate::Error> {
         loop {
-            let (interface, path, event_payload) = self.connection.next_event(&self.shared).await?;
+            let event_payload = self.connection.next_event(&self.shared).await?;
             let device = self.clone();
 
             tokio::spawn(async move {
-                let data = device
-                    .handle_connection_payload(interface, path, event_payload)
-                    .await;
+                let data = device.handle_connection_payload(event_payload).await;
 
                 device.tx.send(data).await.expect("Channel dropped")
             });
@@ -546,23 +544,23 @@ impl<S, C> AstarteDeviceSdk<S, C> {
 
     async fn handle_connection_payload(
         &self,
-        interface: String,
-        path: String,
         connection_payload: C::Payload,
     ) -> Result<AstarteDeviceDataEvent, crate::Error>
     where
         S: PropertyStore,
         C: Connection<S>,
     {
-        let mapping_path = MappingPath::try_from(path.as_str())?;
-
         let data = self
             .connection
-            .handle_payload(&self.shared, (interface, &mapping_path, connection_payload))
+            .handle_payload(&self.shared, connection_payload)
             .await?;
 
-        self.store_payload(data.interface.as_str(), &mapping_path, &data.data)
-            .await?;
+        self.store_payload(
+            data.interface.as_str(),
+            &MappingPath::try_from(data.path.as_str())?,
+            &data.data,
+        )
+        .await?;
 
         Ok(data)
     }
@@ -1150,7 +1148,7 @@ mod test {
 
         client
             .expect_clone()
-            // number of calls not limited since the clone it is inside the loop
+            // number of calls not limited since the clone it's inside a loop
             .returning(|| AsyncClient::default());
 
         client
@@ -1304,7 +1302,7 @@ mod test {
 
         client
             .expect_clone()
-            // number of calls not limited since the clone it is inside the loop
+            // number of calls not limited since the clone it's inside a loop
             .returning(|| AsyncClient::default());
 
         let mut eventloope = EventLoop::default();

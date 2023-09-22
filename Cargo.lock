@@ -110,6 +110,7 @@ dependencies = [
  "itertools 0.11.0",
  "log",
  "mockall",
+ "once_cell",
  "openssl",
  "p384",
  "rand_core",
