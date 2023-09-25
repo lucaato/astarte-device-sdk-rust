@@ -248,6 +248,7 @@ impl<'a> TryFrom<InterfaceDef<'a>> for Interface {
         };
 
         let interface = Interface {
+            // TODO should we add a check to the format of the name here since there are places where we trim ending '/'
             interface_name: def.interface_name.to_string(),
             version_major: def.version_major,
             version_minor: def.version_minor,

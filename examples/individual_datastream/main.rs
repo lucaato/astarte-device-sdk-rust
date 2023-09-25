@@ -17,11 +17,14 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+use serde::Deserialize;
 use std::time::SystemTime;
 
-use serde::Deserialize;
-
-use astarte_device_sdk::{error::Error, options::AstarteOptions};
+use astarte_device_sdk::{
+    error::Error,
+    options::{DeviceBuilder, MqttConfig},
+    Device,
+};
 
 #[derive(Deserialize)]
 struct Config {
@@ -41,19 +44,19 @@ async fn main() -> Result<(), Error> {
         std::fs::read_to_string("./examples/individual_datastream/configuration.json").unwrap();
     let cfg: Config = serde_json::from_str(&file).unwrap();
 
-    // Create Astarte Options
-    let sdk_options = AstarteOptions::new(
+    let mqtt_config = MqttConfig::new(
         &cfg.realm,
         &cfg.device_id,
         &cfg.credentials_secret,
         &cfg.pairing_url,
     )
-    .interface_directory("./examples/individual_datastream/interfaces")?
     .ignore_ssl_errors();
 
-    // Create an Astarte Device (also performs the connection)
-    let (mut device, mut rx_events) =
-        astarte_device_sdk::AstarteDeviceSdk::new(sdk_options).await?;
+    let (mut device, mut rx_events) = DeviceBuilder::new()
+        .interface_directory("./examples/individual_datastream/interfaces")?
+        .connect_mqtt(mqtt_config)
+        .await?;
+
     let device_cpy = device.clone();
     println!("Connection to Astarte established.");
 

@@ -277,7 +277,7 @@ pub(crate) mod tests {
 
     use crate::{
         error::Error, interface::MappingType, interfaces::Interfaces, mapping,
-        options::AstarteOptions, Interface,
+        options::DeviceBuilder, Interface,
     };
 
     pub(crate) const PROPERTIES_SERVER: (&str, &str) = (
@@ -454,7 +454,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_get_instrospection_string() {
-        let mut options = AstarteOptions::new("test", "test", "test", "test");
+        let mut options = DeviceBuilder::new();
         options = options
             .interface_directory("examples/individual_datastream/interfaces")
             .expect("Failed to set interface directory");

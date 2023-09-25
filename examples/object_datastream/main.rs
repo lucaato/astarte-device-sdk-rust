@@ -18,7 +18,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use astarte_device_sdk::{error::Error, options::AstarteOptions, AstarteAggregate};
+use astarte_device_sdk::{
+    error::Error,
+    options::{DeviceBuilder, MqttConfig},
+    AstarteAggregate, Device,
+};
 #[cfg(not(feature = "derive"))]
 use astarte_device_sdk_derive::AstarteAggregate;
 
@@ -47,22 +51,22 @@ async fn main() -> Result<(), Error> {
     let file = std::fs::read_to_string("./examples/object_datastream/configuration.json").unwrap();
     let cfg: Config = serde_json::from_str(&file).unwrap();
 
-    // Create Astarte Options
-    let sdk_options = AstarteOptions::new(
+    let mqtt_config = MqttConfig::new(
         &cfg.realm,
         &cfg.device_id,
         &cfg.credentials_secret,
         &cfg.pairing_url,
     )
-    .interface_directory("./examples/object_datastream/interfaces")?
     .ignore_ssl_errors();
 
     // Create an Astarte Device (also performs the connection)
-    let (mut device, _rx) = astarte_device_sdk::AstarteDeviceSdk::new(sdk_options).await?;
-    println!("Connection to Astarte established.");
+    let (mut device, _rx) = DeviceBuilder::new()
+        .interface_directory("./examples/object_datastream/interfaces")?
+        .connect_mqtt(mqtt_config)
+        .await?;
 
     // Create an thread to transmit
-    let w = device.clone();
+    let device_cpy = device.clone();
     tokio::task::spawn(async move {
         loop {
             let data = DataObject {
@@ -72,13 +76,14 @@ async fn main() -> Result<(), Error> {
             };
 
             println!("Sending {data:?}");
-            w.send_object(
-                "org.astarte-platform.rust.examples.object-datastream.DeviceDatastream",
-                "/23",
-                data,
-            )
-            .await
-            .unwrap();
+            device_cpy
+                .send_object(
+                    "org.astarte-platform.rust.examples.object-datastream.DeviceDatastream",
+                    "/23",
+                    data,
+                )
+                .await
+                .unwrap();
 
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
