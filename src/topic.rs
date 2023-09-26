@@ -20,8 +20,6 @@
 
 use log::trace;
 
-use crate::interface::mapping::path::MappingPath;
-
 /// Error returned when parsing a topic.
 ///
 /// We expect the topic to be in the form `<realm>/<device_id>/<interface>/<path>`.
@@ -33,10 +31,7 @@ pub enum TopicError {
     #[error(
         "the topic should start with <realm>/<device_id> equal to {client_id}, received: {topic}"
     )]
-    UnkownClientId {
-        client_id: String,
-        topic: String
-    },
+    UnkownClientId { client_id: String, topic: String },
     #[error(
         "the topic should be in the form <realm>/<device_id>/<interface>/<path>, received: {0}"
     )]
@@ -53,17 +48,21 @@ impl TopicError {
     }
 }
 
-pub(crate) fn parse_topic<'a>(client_id: &str, topic: &'a str) -> Result<(&'a str, &'a str), TopicError> {
+pub(crate) fn parse_topic<'a>(
+    client_id: &str,
+    topic: &'a str,
+) -> Result<(&'a str, &'a str), TopicError> {
     if topic.is_empty() {
         return Err(TopicError::Empty);
     }
 
-    let rest = topic.starts_with(client_id)
+    let rest = topic
+        .starts_with(client_id)
         // we add 1 since we have to skip the slash that trails the client_id
         .then(|| &topic[(client_id.len() + 1)..])
         .ok_or(TopicError::UnkownClientId {
             client_id: client_id.to_string(),
-            topic: topic.to_string()
+            topic: topic.to_string(),
         })?;
 
     trace!("rest: {}", rest);
@@ -122,6 +121,6 @@ mod tests {
         let topic = "test/u-WraCwtK_G_different/com.interface.test/led/red".to_owned();
         let err = parse_topic(CLIENT_ID, &topic).unwrap_err();
 
-        assert!(matches!(err, TopicError::UnkownClientId(_)));
+        assert!(matches!(err, TopicError::UnkownClientId { .. }));
     }
 }

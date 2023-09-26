@@ -21,8 +21,8 @@ use serde::Deserialize;
 use std::time::SystemTime;
 
 use astarte_device_sdk::{
+    builder::{DeviceBuilder, MqttConfig},
     error::Error,
-    options::{DeviceBuilder, MqttConfig},
     Device,
 };
 

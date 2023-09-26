@@ -19,8 +19,8 @@
  */
 
 use astarte_device_sdk::{
+    builder::{DeviceBuilder, MqttConfig},
     error::Error,
-    options::{DeviceBuilder, MqttConfig},
     AstarteAggregate, Device,
 };
 #[cfg(not(feature = "derive"))]

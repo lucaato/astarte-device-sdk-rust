@@ -24,8 +24,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::{
-    interface::mapping::path::MappingPath, shared::SharedDevice, types::AstarteType,
-    AstarteDeviceDataEvent, Aggregation, interfaces::{MappingRef, ObjectRef}, Interface,
+    interface::mapping::path::MappingPath,
+    interfaces::{MappingRef, ObjectRef},
+    shared::SharedDevice,
+    types::AstarteType,
+    Interface,
 };
 
 pub mod mqtt;
@@ -40,11 +43,23 @@ pub(crate) struct ReceivedEvent<P: Send> {
 pub(crate) trait Connection<S>: Send + Sync + Clone + 'static {
     type Payload: Send + Sync + 'static;
 
-    async fn next_event(&self, device: &SharedDevice<S>) -> Result<ReceivedEvent<Self::Payload>, crate::Error>;
+    async fn next_event(
+        &self,
+        device: &SharedDevice<S>,
+    ) -> Result<ReceivedEvent<Self::Payload>, crate::Error>;
 
-    fn deserialize_individual(&self, mappig: MappingRef<'_, &Interface>, payload: &Self::Payload) -> Result<(AstarteType, Option<DateTime<Utc>>), crate::Error>;
+    fn deserialize_individual(
+        &self,
+        mappig: MappingRef<'_, &Interface>,
+        payload: &Self::Payload,
+    ) -> Result<(AstarteType, Option<DateTime<Utc>>), crate::Error>;
 
-    fn deserialize_object(&self, object: ObjectRef, path: &MappingPath, payload: &Self::Payload) -> Result<(HashMap<String, AstarteType>, Option<DateTime<Utc>>), crate::Error>;
+    fn deserialize_object(
+        &self,
+        object: ObjectRef,
+        path: &MappingPath,
+        payload: &Self::Payload,
+    ) -> Result<(HashMap<String, AstarteType>, Option<DateTime<Utc>>), crate::Error>;
 
     //async fn handle_payload(
     //    &self,
@@ -61,14 +76,17 @@ pub(crate) trait Connection<S>: Send + Sync + Clone + 'static {
     //    timestamp: Option<DateTime<Utc>>,
     //) -> Result<(), crate::Error>;
 
-    // send methods receives a validated wrapper type that already contains the interface and the path 
-    async fn send_individual<'a>(&self,
+    // send methods receives a validated wrapper type that already contains the interface and the path
+    async fn send_individual<'a>(
+        &self,
         mapping: MappingRef<'a, &'a Interface>,
+        path: &MappingPath,
         data: &AstarteType,
         timestamp: Option<DateTime<Utc>>,
     ) -> Result<(), crate::Error>;
 
-    async fn send_object(&self,
+    async fn send_object(
+        &self,
         object: ObjectRef<'_>,
         path: &MappingPath,
         data: &HashMap<String, AstarteType>,

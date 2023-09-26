@@ -30,7 +30,7 @@ use std::error::Error as StdError;
 
 use astarte_device_sdk::{
     store::sqlite::SqliteStore,
-    options::{DeviceBuilder, MqttConfig},
+    builder::{DeviceBuilder, MqttConfig},
     error::Error,
     AstarteDeviceSdk,
     Device,

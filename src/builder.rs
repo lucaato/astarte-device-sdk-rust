@@ -121,7 +121,7 @@ impl MqttConfig {
     /// Create a new instance of MqttConfig
     ///
     /// ```no_run
-    /// use astarte_device_sdk::options::MqttConfig;
+    /// use astarte_device_sdk::builder::MqttConfig;
     ///
     /// #[tokio::main]
     /// async fn main(){
@@ -177,7 +177,7 @@ impl DeviceBuilder<MemoryStore> {
     /// Create a new instance of the DeviceBuilder.
     ///
     /// ```no_run
-    /// use astarte_device_sdk::options::{DeviceBuilder, MqttConfig};
+    /// use astarte_device_sdk::builder::{DeviceBuilder, MqttConfig};
     ///
     /// #[tokio::main]
     /// async fn main(){

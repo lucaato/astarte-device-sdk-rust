@@ -19,6 +19,7 @@
  */
 #![doc = include_str!("../README.md")]
 
+pub mod builder;
 pub mod connection;
 pub mod crypto;
 pub mod error;
@@ -26,7 +27,6 @@ pub mod interface;
 mod interfaces;
 #[cfg(test)]
 mod mock;
-pub mod options;
 pub mod pairing;
 pub mod payload;
 pub mod properties;
@@ -38,12 +38,10 @@ mod topic;
 pub mod types;
 mod validate;
 
-use bson::oid::ObjectId;
-use ecdsa::signature::digest::typenum::private::IsLessPrivate;
-use tokio::sync::{mpsc, RwLock};
 use async_trait::async_trait;
-use connection::{Connection, Registry, ReceivedEvent};
+use connection::{Connection, ReceivedEvent, Registry};
 use interfaces::Interfaces;
+use tokio::sync::{mpsc, RwLock};
 
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -56,7 +54,7 @@ use std::sync::Arc;
 pub use chrono;
 pub use rumqttc;
 
-use log::{debug, trace, warn, info, error};
+use log::{debug, error, info, trace, warn};
 
 /// Re-exported internal structs
 pub use crate::interface::Interface;
@@ -66,9 +64,6 @@ use crate::interface::mapping::path::MappingPath;
 use crate::interface::{Aggregation as InterfaceAggregation, InterfaceError};
 use crate::interfaces::MappingRef;
 use crate::interfaces::PropertyRef;
-use crate::payload::{
-    deserialize_individual, deserialize_object, serialize_individual, serialize_object,
-};
 use crate::shared::SharedDevice;
 use crate::store::wrapper::StoreWrapper;
 use crate::store::PropertyStore;
@@ -194,7 +189,7 @@ pub trait Device {
     /// Send an object datastreamy on an interface, with an explicit timestamp.
     ///
     /// ```no_run
-    /// # use astarte_device_sdk::{AstarteDeviceSdk, Device, options::{DeviceBuilder, MqttConfig}, AstarteAggregate};
+    /// # use astarte_device_sdk::{AstarteDeviceSdk, Device, builder::{DeviceBuilder, MqttConfig}, AstarteAggregate};
     /// #[cfg(not(feature = "derive"))]
     /// use astarte_device_sdk_derive::AstarteAggregate;
     /// use chrono::{TimeZone, Utc};
@@ -207,8 +202,7 @@ pub trait Device {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_")
-    ///         .ignore_ssl_errors();
+    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_");
     ///
     ///     let (mut device, _rx_events) = DeviceBuilder::new()
     ///         .connect_mqtt(mqtt_config).await.unwrap();
@@ -254,13 +248,12 @@ pub trait Device {
     /// Send an individual datastream/property on an interface, with an explicit timestamp.
     ///
     /// ```no_run
-    /// use astarte_device_sdk::{AstarteDeviceSdk, Device, options::{DeviceBuilder, MqttConfig}};
+    /// use astarte_device_sdk::{AstarteDeviceSdk, Device, builder::{DeviceBuilder, MqttConfig}};
     /// use chrono::{TimeZone, Utc};
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_")
-    ///         .ignore_ssl_errors();
+    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_");
     ///
     ///     let (mut device, _rx_events) = DeviceBuilder::new()
     ///         .connect_mqtt(mqtt_config).await.unwrap();
@@ -302,12 +295,11 @@ pub trait Device {
     /// thread.
     ///
     /// ```no_run
-    /// use astarte_device_sdk::{AstarteDeviceSdk, Device, options::{DeviceBuilder, MqttConfig}};
+    /// use astarte_device_sdk::{AstarteDeviceSdk, Device, builder::{DeviceBuilder, MqttConfig}};
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_")
-    ///         .ignore_ssl_errors();
+    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_");
     ///
     ///     let (mut device, mut rx_events) = DeviceBuilder::new()
     ///         .connect_mqtt(mqtt_config).await.unwrap();
@@ -326,12 +318,14 @@ pub trait Device {
     /// Unset a device property.
     ///
     /// ```no_run
-    /// use astarte_device_sdk::{AstarteDeviceSdk, options::AstarteOptions};
+    /// use astarte_device_sdk::{AstarteDeviceSdk, Device, builder::{DeviceBuilder, MqttConfig}};
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let mut sdk_options = AstarteOptions::new("_","_","_","_");
-    ///     let (mut device, _rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
+    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_");
+    ///
+    ///     let (mut device, _rx_events) = DeviceBuilder::new()
+    ///         .connect_mqtt(mqtt_config).await.unwrap();
     ///
     ///     device
     ///         .unset("my.interface.name", "/endpoint/path",)
@@ -364,8 +358,8 @@ pub trait PropertyRegistry {
     ///
     /// ```no_run
     /// use astarte_device_sdk::{
-    ///     AstarteDeviceSdk, store::sqlite::SqliteStore, options::AstarteOptions,
-    ///     types::AstarteType
+    ///     AstarteDeviceSdk, PropertyRegistry, store::sqlite::SqliteStore, builder::DeviceBuilder,
+    ///     builder::MqttConfig, types::AstarteType
     /// };
     ///
     /// #[tokio::main]
@@ -373,8 +367,10 @@ pub trait PropertyRegistry {
     ///     let database = SqliteStore::new("path/to/database/file.sqlite")
     ///         .await
     ///         .unwrap();
-    ///     let mut sdk_options = AstarteOptions::new("_","_","_","_").store(database);
-    ///     let (mut device, _rx_events) = AstarteDeviceSdk::new(sdk_options).await.unwrap();
+    ///     let mqtt_config = MqttConfig::new("_", "_", "_", "_");
+    ///
+    ///     let (mut device, _rx_events) = DeviceBuilder::new().store(database)
+    ///         .connect_mqtt(mqtt_config).await.unwrap();
     ///
     ///     let property_value: Option<AstarteType> = device
     ///         .get_property("my.interface.name", "/endpoint/path",)
@@ -469,15 +465,16 @@ where
             let device = self.clone();
 
             tokio::spawn(async move {
-                let data = device.handle_event(&event_payload).await
+                let data = device
+                    .handle_event(&event_payload)
+                    .await
                     .map(|aggregation| AstarteDeviceDataEvent {
                         interface: event_payload.interface,
                         path: event_payload.path,
                         data: aggregation,
                     });
 
-                device.tx.send(data).await
-                    .expect("Channel dropped")
+                device.tx.send(data).await.expect("Channel dropped")
             });
         }
     }
@@ -568,12 +565,19 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         }
     }
 
-    async fn handle_event(&self, connection_event: &ReceivedEvent<C::Payload>) -> Result<Aggregation, crate::Error>
+    async fn handle_event(
+        &self,
+        connection_event: &ReceivedEvent<C::Payload>,
+    ) -> Result<Aggregation, crate::Error>
     where
         S: PropertyStore,
         C: Connection<S>,
     {
-        let ReceivedEvent { interface, path, payload } = connection_event;
+        let ReceivedEvent {
+            interface,
+            path,
+            payload,
+        } = connection_event;
 
         let path = MappingPath::try_from(path.as_str())?;
 
@@ -584,8 +588,14 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         })?;
 
         let (data, timestamp) = match interface.aggregation() {
-            InterfaceAggregation::Individual => self.handle_payload_individual(interface, &path, payload).await?,
-            InterfaceAggregation::Object => self.handle_payload_object(interface, &path, payload).await?,
+            InterfaceAggregation::Individual => {
+                self.handle_payload_individual(interface, &path, payload)
+                    .await?
+            }
+            InterfaceAggregation::Object => {
+                self.handle_payload_object(interface, &path, payload)
+                    .await?
+            }
         };
 
         debug!("received {{v: {data:?}, t: {timestamp:?}}}");
@@ -636,7 +646,7 @@ impl<S, C> AstarteDeviceSdk<S, C> {
     ) -> Result<(Aggregation, Option<chrono::DateTime<chrono::Utc>>), Error>
     where
         S: PropertyStore,
-        C: Connection<S>
+        C: Connection<S>,
     {
         let object = interface.as_object_ref().ok_or(Error::Aggregation {
             exp: InterfaceAggregation::Object,
@@ -693,35 +703,6 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         Ok(value)
     }
 
-    async fn store_property_on_send<'a>(
-        &self,
-        property: PropertyRef<'a>,
-        interface_path: &MappingPath<'a>,
-        data: &AstarteType,
-    ) -> Result<(), Error>
-    where
-        S: PropertyStore,
-    {
-        property.mapping(interface_path).ok_or_else(|| {
-            Error::Interface(InterfaceError::MappingNotFound {
-                path: interface_path.to_string(),
-            })
-        })?;
-
-        self.store
-            .store_prop(
-                property.interface_name(),
-                interface_path.as_str(),
-                data,
-                property.version_major(),
-            )
-            .await?;
-
-        debug!("Stored new property in database");
-
-        Ok(())
-    }
-
     /// Checks wether a passed interface is a property and if it is already stored with the same value.
     /// Useful to prevent sending a property twice with the same value.
     /// The returned value is [`Option::None`] if the interface is not of property type.
@@ -774,7 +755,7 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         let data = data.try_into().map_err(|_| TypeError::Conversion)?;
 
         self.connection
-            .send_individual(mapping, &data, timestamp)
+            .send_individual(mapping, path, &data, timestamp)
             .await?;
 
         Ok(())
@@ -815,7 +796,7 @@ impl<S, C> AstarteDeviceSdk<S, C> {
 
         // TODO like it has to be done for objects i need to move the validation in an independant function
         self.connection
-            .send_individual(mapping, &data, timestamp)
+            .send_individual(mapping, path, &data, timestamp)
             .await?;
 
         // Store the property in the database after it has been successfully sent
@@ -938,9 +919,8 @@ mod test {
     use crate::payload::Payload;
     use crate::properties::tests::PROPERTIES_PAYLOAD;
     use crate::store::memory::MemoryStore;
-    use crate::store::wrapper::StoreWrapper;
     use crate::{
-        self as astarte_device_sdk, payload, Device, EventReceiver, Interface, InterfaceRegistry,
+        self as astarte_device_sdk, Device, EventReceiver, Interface, InterfaceRegistry,
         PropertyRegistry,
     };
     use astarte_device_sdk::AstarteAggregate;
@@ -971,7 +951,7 @@ mod test {
             Interfaces::from_iter(
                 interfaces
                     .into_iter()
-                    .map(|i| (i.interface_name().to_string(), i))
+                    .map(|i| (i.interface_name().to_string(), i)),
             ),
             MemoryStore::new(),
             Mqtt::new(

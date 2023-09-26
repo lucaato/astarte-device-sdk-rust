@@ -35,7 +35,7 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use tokio::{task, time};
 
-use astarte_device_sdk::options::{DeviceBuilder, MqttConfig};
+use astarte_device_sdk::builder::{DeviceBuilder, MqttConfig};
 use astarte_device_sdk::types::AstarteType;
 use astarte_device_sdk::Device;
 

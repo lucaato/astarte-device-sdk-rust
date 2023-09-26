@@ -20,9 +20,9 @@
 
 use std::convert::Infallible;
 
+use crate::builder::BuilderError;
 use crate::interface::mapping::path::MappingError;
 use crate::interface::{Aggregation, InterfaceError, InterfaceTypeDef};
-use crate::options::BuilderError;
 use crate::payload::PayloadError;
 use crate::properties::PropertiesError;
 use crate::store::error::StoreError;

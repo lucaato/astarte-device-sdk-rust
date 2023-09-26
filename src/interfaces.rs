@@ -276,8 +276,8 @@ pub(crate) mod tests {
     use std::str::FromStr;
 
     use crate::{
-        error::Error, interface::MappingType, interfaces::Interfaces, mapping,
-        options::DeviceBuilder, Interface,
+        builder::DeviceBuilder, error::Error, interface::MappingType, interfaces::Interfaces,
+        mapping, Interface,
     };
 
     pub(crate) const PROPERTIES_SERVER: (&str, &str) = (

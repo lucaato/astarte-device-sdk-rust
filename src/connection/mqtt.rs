@@ -25,7 +25,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use log::{debug, error, info, trace};
 use once_cell::sync::OnceCell;
-use rumqttc::{Event as MqttEvent, Packet, Publish};
+use rumqttc::{Event as MqttEvent, Packet};
 use tokio::sync::Mutex;
 
 #[cfg(test)]
@@ -34,18 +34,19 @@ pub(crate) use crate::mock::{MockAsyncClient as AsyncClient, MockEventLoop as Ev
 pub(crate) use rumqttc::{AsyncClient, EventLoop};
 
 use crate::{
-    interface::{mapping::{path::MappingPath, self}, Ownership},
+    interface::{mapping::path::MappingPath, Ownership},
     interfaces::{Interfaces, MappingRef, ObjectRef},
-    payload::{self, Payload}, properties,
+    payload::{self, Payload},
+    properties,
     retry::DelayedPoll,
     shared::SharedDevice,
     store::{PropertyStore, StoredProp},
     topic::parse_topic,
     types::AstarteType,
-    AstarteDeviceDataEvent, Aggregation, Interface,
+    Interface,
 };
 
-use super::{Connection, Registry, ReceivedEvent};
+use super::{Connection, ReceivedEvent, Registry};
 
 pub struct SharedMqtt {
     realm: String,
@@ -327,7 +328,10 @@ where
 {
     type Payload = Bytes;
 
-    async fn next_event(&self, device: &SharedDevice<S>) -> Result<ReceivedEvent<Self::Payload>, crate::Error> {
+    async fn next_event(
+        &self,
+        device: &SharedDevice<S>,
+    ) -> Result<ReceivedEvent<Self::Payload>, crate::Error> {
         static PURGE_PROPERTIES_TOPIC: OnceCell<String> = OnceCell::new();
         static CLIENT_ID: OnceCell<String> = OnceCell::new();
 
@@ -336,7 +340,9 @@ where
             match self.poll().await? {
                 rumqttc::Packet::ConnAck(connack) => self.connack(device, connack).await?,
                 rumqttc::Packet::Publish(publish) => {
-                    let purge_topic = PURGE_PROPERTIES_TOPIC.get_or_init(|| format!("{}/control/consumer/properties", self.client_id()));
+                    let purge_topic = PURGE_PROPERTIES_TOPIC.get_or_init(|| {
+                        format!("{}/control/consumer/properties", self.client_id())
+                    });
 
                     debug!("Incoming publish = {} {:x}", publish.topic, publish.payload);
 
@@ -362,28 +368,43 @@ where
         }
     }
 
-    fn deserialize_individual(&self, mapping: MappingRef<'_, &Interface>, payload: &Self::Payload) -> Result<(AstarteType, Option<DateTime<Utc>>), crate::Error> {
-        payload::deserialize_individual(mapping, payload)
-            .map_err(|err| err.into())
+    fn deserialize_individual(
+        &self,
+        mapping: MappingRef<'_, &Interface>,
+        payload: &Self::Payload,
+    ) -> Result<(AstarteType, Option<DateTime<Utc>>), crate::Error> {
+        payload::deserialize_individual(mapping, payload).map_err(|err| err.into())
     }
 
-    fn deserialize_object(&self, object: ObjectRef, path: &MappingPath, payload: &Self::Payload) -> Result<(HashMap<String, AstarteType>, Option<DateTime<Utc>>), crate::Error> {
-        payload::deserialize_object(object, path, payload)
-            .map_err(|err| err.into())
+    fn deserialize_object(
+        &self,
+        object: ObjectRef,
+        path: &MappingPath,
+        payload: &Self::Payload,
+    ) -> Result<(HashMap<String, AstarteType>, Option<DateTime<Utc>>), crate::Error> {
+        payload::deserialize_object(object, path, payload).map_err(|err| err.into())
     }
 
-    // TODO add MappingPath parameter to have a validted path as input
-    async fn send_individual<'a>(&self,
+    async fn send_individual<'a>(
+        &self,
         mapping: MappingRef<'a, &'a Interface>,
+        path: &MappingPath,
         data: &AstarteType,
         timestamp: Option<DateTime<Utc>>,
     ) -> Result<(), crate::Error> {
         let buf = payload::serialize_individual(mapping, data, timestamp)?;
 
-        self.send(mapping.interface(), mapping.mapping().endpoint(), mapping.reliability().into(), buf).await
+        self.send(
+            mapping.interface(),
+            path.as_str(),
+            mapping.reliability().into(),
+            buf,
+        )
+        .await
     }
 
-    async fn send_object(&self,
+    async fn send_object(
+        &self,
         object: ObjectRef<'_>,
         path: &MappingPath,
         data: &HashMap<String, AstarteType>,
@@ -391,7 +412,13 @@ where
     ) -> Result<(), crate::Error> {
         let buf = payload::serialize_object(object, path, data, timestamp)?;
 
-        self.send(object.interface, path.as_str(), object.reliability().into(), buf).await
+        self.send(
+            object.interface,
+            path.as_str(),
+            object.reliability().into(),
+            buf,
+        )
+        .await
     }
 }
 
@@ -518,9 +545,11 @@ mod test {
 
         let mqtt_connection = mock_mqtt_connection(client, eventl);
         let shared_device = SharedDevice {
-            interfaces: RwLock::new(
-                Interfaces::from(interfaces).expect("Error while contructing Interfaces object"),
-            ),
+            interfaces: RwLock::new(Interfaces::from_iter(
+                interfaces
+                    .into_iter()
+                    .map(|i| (i.interface_name().to_string(), i)),
+            )),
             store: StoreWrapper {
                 store: MemoryStore::new(),
             },

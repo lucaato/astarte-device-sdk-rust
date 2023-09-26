@@ -30,8 +30,8 @@ use serde_json::json;
 use url::ParseError;
 
 use crate::{
+    builder::{BuilderError, MqttConfig},
     crypto::{Bundle, CryptoError},
-    options::{BuilderError, MqttConfig},
 };
 
 #[derive(Serialize, Deserialize, Debug)]
