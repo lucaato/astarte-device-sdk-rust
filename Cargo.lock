@@ -149,6 +149,7 @@ dependencies = [
 [[package]]
 name = "astarte-message-hub-proto"
 version = "0.5.1"
+source = "git+https://github.com/lucaato/astarte-message-hub-proto.git?branch=rust-support#67e1f895211de0b991a7fcd086cf7b1dd28f6307"
 dependencies = [
  "chrono",
  "pbjson-types",

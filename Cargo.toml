@@ -51,7 +51,7 @@ url = "2.4.0"
 uuid = { version = "1.3.4", features = ["v5", "v4"] }
 webpki = "0.22.0"
 x509-cert = { version = "0.2.3", features = ["builder"] }
-astarte-message-hub-proto = {path ="../../workspace_doc/astarte-message-hub-proto/rust/astarte-message-hub-proto"}
+astarte-message-hub-proto = { git = "https://github.com/lucaato/astarte-message-hub-proto.git", branch = "rust-support" }
 
 [dev-dependencies]
 astarte-device-sdk-derive = { path = "./astarte-device-sdk-derive" }
