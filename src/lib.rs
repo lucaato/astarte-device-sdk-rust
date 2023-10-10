@@ -567,6 +567,14 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         }
     }
 
+    pub(crate) async fn connect(&self) -> Result<(), Error>
+    where
+        S: PropertyStore,
+        C: Connection<S>,
+    {
+        self.connection.connect(&self.shared).await
+    }
+
     async fn handle_event(
         &self,
         connection_event: &ReceivedEvent<C::Payload>,

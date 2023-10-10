@@ -162,7 +162,7 @@ impl MqttConfig {
         self
     }
 
-    async fn connect(self, cap: usize) -> Result<Mqtt, crate::Error> {
+    async fn build(self, cap: usize) -> Result<Mqtt, crate::Error> {
         let mqtt_options = pairing::get_transport_config(&self).await?;
 
         debug!("{:#?}", mqtt_options);
@@ -229,9 +229,12 @@ where
         self,
         mqtt_config: MqttConfig,
     ) -> Result<(AstarteDeviceSdk<S, Mqtt>, EventReceiver), crate::Error> {
-        let connection = mqtt_config.connect(Self::MQTT_CHANNEL_SIZE).await?;
+        let connection = mqtt_config.build(Self::MQTT_CHANNEL_SIZE).await?;
+        let (device, rx) = self.build(connection);
 
-        Ok(self.build(connection))
+        device.connect().await?;
+
+        Ok((device, rx))
     }
 
     pub(crate) fn build<C>(self, connection: C) -> (AstarteDeviceSdk<S, C>, EventReceiver)

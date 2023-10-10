@@ -22,7 +22,7 @@ use std::{collections::HashMap, fmt::Display, ops::Deref, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use once_cell::sync::OnceCell;
 use rumqttc::{Event as MqttEvent, Packet};
 use tokio::sync::Mutex;
@@ -101,10 +101,8 @@ impl Introspection {
     fn filter_server_interfaces(interfaces: &Interfaces) -> Vec<String> {
         interfaces
             .iter_interfaces()
-            .filter_map(|interface| match interface.ownership() {
-                Ownership::Server => Some(interface.interface_name().to_owned()),
-                Ownership::Device => None,
-            })
+            .filter(|interface| interface.ownership() == Ownership::Server)
+            .map(|interface| interface.interface_name().to_owned())
             .collect()
     }
 
@@ -186,6 +184,7 @@ impl Mqtt {
         self.send_introspection(interfaces).await?; // interfaces
         self.send_emptycache().await?;
         self.send_device_properties(&device_properties).await?;
+
         info!("connack done");
 
         Ok(())
@@ -326,6 +325,19 @@ where
     S: PropertyStore,
 {
     type Payload = Bytes;
+
+    async fn connect(&self, device: &SharedDevice<S>) -> Result<(), crate::Error> {
+        loop {
+            match self.poll().await? {
+                rumqttc::Packet::ConnAck(connack) => {
+                    self.connack(device, connack).await?;
+
+                    return Ok(());
+                }
+                packet => warn!("Received incoming packet while waiting for connack: {packet:?}"),
+            }
+        }
+    }
 
     async fn next_event(
         &self,

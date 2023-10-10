@@ -42,6 +42,8 @@ pub(crate) struct ReceivedEvent<P: Send> {
 pub(crate) trait Connection<S>: Send + Sync + Clone + 'static {
     type Payload: Send + Sync + 'static;
 
+    async fn connect(&self, device: &SharedDevice<S>) -> Result<(), crate::Error>;
+
     async fn next_event(
         &self,
         device: &SharedDevice<S>,
