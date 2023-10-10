@@ -21,14 +21,13 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 
 use crate::{
     interface::mapping::path::MappingPath,
     interfaces::{MappingRef, ObjectRef},
     shared::SharedDevice,
     types::AstarteType,
-    Interface,
+    Interface, Timestamp,
 };
 
 pub mod mqtt;
@@ -52,14 +51,14 @@ pub(crate) trait Connection<S>: Send + Sync + Clone + 'static {
         &self,
         mappig: MappingRef<'_, &Interface>,
         payload: &Self::Payload,
-    ) -> Result<(AstarteType, Option<DateTime<Utc>>), crate::Error>;
+    ) -> Result<(AstarteType, Option<Timestamp>), crate::Error>;
 
     fn deserialize_object(
         &self,
         object: ObjectRef,
-        path: &MappingPath,
+        path: &MappingPath<'_>,
         payload: &Self::Payload,
-    ) -> Result<(HashMap<String, AstarteType>, Option<DateTime<Utc>>), crate::Error>;
+    ) -> Result<(HashMap<String, AstarteType>, Option<Timestamp>), crate::Error>;
 
     //async fn handle_payload(
     //    &self,
@@ -73,16 +72,16 @@ pub(crate) trait Connection<S>: Send + Sync + Clone + 'static {
     //    interface_name: &str,
     //    interface_path: &MappingPath<'a>,
     //    payload: Self::SendPayload,
-    //    timestamp: Option<DateTime<Utc>>,
+    //    timestamp: Option<Timestamp>,
     //) -> Result<(), crate::Error>;
 
     // send methods receives a validated wrapper type that already contains the interface and the path
     async fn send_individual<'a>(
         &self,
         mapping: MappingRef<'a, &'a Interface>,
-        path: &MappingPath,
+        path: &MappingPath<'_>,
         data: &AstarteType,
-        timestamp: Option<DateTime<Utc>>,
+        timestamp: Option<Timestamp>,
     ) -> Result<(), crate::Error>;
 
     async fn send_object(
@@ -90,7 +89,7 @@ pub(crate) trait Connection<S>: Send + Sync + Clone + 'static {
         object: ObjectRef<'_>,
         path: &MappingPath,
         data: &HashMap<String, AstarteType>,
-        timestamp: Option<DateTime<Utc>>,
+        timestamp: Option<Timestamp>,
     ) -> Result<(), crate::Error>;
 }
 

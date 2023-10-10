@@ -22,7 +22,6 @@ use std::{collections::HashMap, fmt::Display, ops::Deref, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 use log::{debug, error, info, trace};
 use once_cell::sync::OnceCell;
 use rumqttc::{Event as MqttEvent, Packet};
@@ -43,7 +42,7 @@ use crate::{
     store::{PropertyStore, StoredProp},
     topic::parse_topic,
     types::AstarteType,
-    Interface,
+    Interface, Timestamp,
 };
 
 use super::{Connection, ReceivedEvent, Registry};
@@ -352,7 +351,7 @@ where
                         self.purge_properties(device, &publish.payload).await?;
                     } else {
                         let client_id = CLIENT_ID.get_or_init(|| format!("{}", self.client_id()));
-                        let (interface, path) = parse_topic(&client_id, &publish.topic)?;
+                        let (interface, path) = parse_topic(client_id, &publish.topic)?;
 
                         return Ok(ReceivedEvent {
                             interface: interface.to_string(),
@@ -372,25 +371,25 @@ where
         &self,
         mapping: MappingRef<'_, &Interface>,
         payload: &Self::Payload,
-    ) -> Result<(AstarteType, Option<DateTime<Utc>>), crate::Error> {
+    ) -> Result<(AstarteType, Option<Timestamp>), crate::Error> {
         payload::deserialize_individual(mapping, payload).map_err(|err| err.into())
     }
 
     fn deserialize_object(
         &self,
         object: ObjectRef,
-        path: &MappingPath,
+        path: &MappingPath<'_>,
         payload: &Self::Payload,
-    ) -> Result<(HashMap<String, AstarteType>, Option<DateTime<Utc>>), crate::Error> {
+    ) -> Result<(HashMap<String, AstarteType>, Option<Timestamp>), crate::Error> {
         payload::deserialize_object(object, path, payload).map_err(|err| err.into())
     }
 
     async fn send_individual<'a>(
         &self,
         mapping: MappingRef<'a, &'a Interface>,
-        path: &MappingPath,
+        path: &MappingPath<'_>,
         data: &AstarteType,
-        timestamp: Option<DateTime<Utc>>,
+        timestamp: Option<Timestamp>,
     ) -> Result<(), crate::Error> {
         let buf = payload::serialize_individual(mapping, data, timestamp)?;
 
@@ -408,7 +407,7 @@ where
         object: ObjectRef<'_>,
         path: &MappingPath,
         data: &HashMap<String, AstarteType>,
-        timestamp: Option<DateTime<Utc>>,
+        timestamp: Option<Timestamp>,
     ) -> Result<(), crate::Error> {
         let buf = payload::serialize_object(object, path, data, timestamp)?;
 

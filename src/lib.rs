@@ -120,6 +120,8 @@ impl AstarteAggregate for HashMap<String, AstarteType> {
 pub type EventSender = mpsc::Sender<Result<AstarteDeviceDataEvent, Error>>;
 /// Receiver end of the channel for the [`AstarteDeviceDataEvent`].
 pub type EventReceiver = mpsc::Receiver<Result<AstarteDeviceDataEvent, Error>>;
+/// Timestamp returned int the astarte payload
+pub(crate) type Timestamp = chrono::DateTime<chrono::Utc>;
 
 // Re-export #[derive(AstarteAggregate)].
 //
@@ -722,7 +724,7 @@ impl<S, C> AstarteDeviceSdk<S, C> {
 
         if let Some(prop_mapping) = opt_property {
             // Check if this property is already in db
-            let stored = self.property(&prop_mapping, &path).await?;
+            let stored = self.property(&prop_mapping, path).await?;
 
             match stored {
                 Some(value) if value.eq(new) => Ok(Some(Ok(*prop_mapping.interface()))),
@@ -789,7 +791,7 @@ impl<S, C> AstarteDeviceSdk<S, C> {
 
         let prop_stored = self.is_property_stored(&mapping, path, &data).await?;
 
-        if prop_stored.is_some_and(|res| res.is_ok()) {
+        if prop_stored.map_or(false, |r| r.is_ok()) {
             debug!("property was already sent, no need to send it again");
             return Ok(());
         }
