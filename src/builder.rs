@@ -300,7 +300,9 @@ fn walk_dir_json<P: AsRef<Path>>(path: P) -> Result<Vec<PathBuf>, io::Error> {
 
 #[cfg(test)]
 mod test {
-    use super::DeviceBuilder;
+    use std::time::Duration;
+
+    use super::{DeviceBuilder, MqttConfig};
 
     #[test]
     fn interface_directory() {
@@ -326,5 +328,41 @@ mod test {
             "Failed to load interfaces from directory: {:?}",
             res
         );
+    }
+
+    #[test]
+    fn test_default_mqtt_config() {
+        let mqtt_config = MqttConfig::new("test", "test", "test", "test");
+
+        assert_eq!(mqtt_config.realm, "test");
+        assert_eq!(mqtt_config.device_id, "test");
+        assert_eq!(mqtt_config.credentials_secret, "test");
+        assert_eq!(mqtt_config.pairing_url, "test");
+        assert_eq!(mqtt_config.keepalive, Duration::from_secs(30));
+        assert!(!mqtt_config.ignore_ssl_errors);
+    }
+
+    #[test]
+    fn test_override_mqtt_config() {
+        let mqtt_config = MqttConfig::new("test", "test", "test", "test")
+            .ignore_ssl_errors()
+            .keepalive(Duration::from_secs(60));
+
+        assert_eq!(mqtt_config.realm, "test");
+        assert_eq!(mqtt_config.device_id, "test");
+        assert_eq!(mqtt_config.credentials_secret, "test");
+        assert_eq!(mqtt_config.pairing_url, "test");
+        assert_eq!(mqtt_config.keepalive, Duration::from_secs(60));
+        assert!(mqtt_config.ignore_ssl_errors);
+    }
+
+    #[test]
+    fn test_redacted_credentials_secret() {
+        let mqtt_config = MqttConfig::new("test", "test", "secret=", "test");
+
+        let debug_string = format!("{:?}", mqtt_config);
+
+        assert!(!debug_string.contains("secret="));
+        assert!(debug_string.contains("REDACTED"));
     }
 }

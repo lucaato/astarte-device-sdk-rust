@@ -743,34 +743,6 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         }
     }
 
-    // Dead code allowed, this function will be used when the GRPC connection implementation will be added to the sdk
-    #[allow(dead_code)]
-    async fn send_impl<D>(
-        &self,
-        interface_name: &str,
-        path: &MappingPath<'_>,
-        data: D,
-        timestamp: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<(), Error>
-    where
-        C: Connection<S>,
-        D: TryInto<AstarteType> + Send,
-    {
-        debug!("sending {} {}", interface_name, path);
-
-        let interfaces = self.interfaces.read().await;
-        let mapping = interfaces.interface_mapping(interface_name, path)?;
-
-        // TODO like it has to be done for objects i need to move the validation in an independant function
-        let data = data.try_into().map_err(|_| TypeError::Conversion)?;
-
-        self.connection
-            .send_individual(mapping, path, &data, timestamp)
-            .await?;
-
-        Ok(())
-    }
-
     async fn send_store_impl<D>(
         &self,
         interface_name: &str,
@@ -804,7 +776,6 @@ impl<S, C> AstarteDeviceSdk<S, C> {
             return Ok(());
         }
 
-        // TODO like it has to be done for objects i need to move the validation in an independant function
         self.connection
             .send_individual(mapping, path, &data, timestamp)
             .await?;
@@ -1483,5 +1454,65 @@ mod test {
 
         handle_events.abort();
         let _ = handle_events.await;
+    }
+
+    #[tokio::test]
+    async fn test_send_object() {
+        struct MockObject {}
+
+        impl AstarteAggregate for MockObject {
+            fn astarte_aggregate(
+                self,
+            ) -> Result<HashMap<String, AstarteType>, astarte_device_sdk::error::Error>
+            {
+                let mut obj = HashMap::new();
+                obj.insert("endpoint1".to_string(), AstarteType::Double(4.2));
+                obj.insert(
+                    "endpoint2".to_string(),
+                    AstarteType::String("obj".to_string()),
+                );
+                obj.insert(
+                    "endpoint3".to_string(),
+                    AstarteType::BooleanArray(vec![true]),
+                );
+
+                Ok(obj)
+            }
+        }
+
+        let mut client = AsyncClient::default();
+        let eventloope = EventLoop::default();
+
+        client
+            .expect_clone()
+            // number of calls not limited since the clone it's inside a loop
+            .returning(AsyncClient::default);
+
+        client
+            .expect_publish::<String, Vec<u8>>()
+            .once()
+            .with(
+                predicate::eq("realm/device_id/org.astarte-platform.rust.examples.object-datastream.DeviceDatastream/1".to_string()),
+                predicate::always(),
+                predicate::always(),
+                predicate::always()
+            )
+            .returning(|_, _, _, _| Ok(()));
+
+        let (device, _rx) = mock_astarte_device(
+            client,
+            eventloope,
+            [Interface::from_str(OBJECT_DEVICE_DATASTREAM).unwrap()],
+        );
+
+        device
+            .send_object_with_timestamp(
+                "org.astarte-platform.rust.examples.object-datastream.DeviceDatastream",
+                "/1",
+                MockObject {},
+                chrono::offset::Utc::now(),
+            )
+            .await
+            .unwrap();
     }
 }

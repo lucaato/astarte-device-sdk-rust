@@ -62,22 +62,6 @@ pub(crate) trait Connection<S>: Send + Sync + Clone + 'static {
         payload: &Self::Payload,
     ) -> Result<(HashMap<String, AstarteType>, Option<Timestamp>), crate::Error>;
 
-    //async fn handle_payload(
-    //    &self,
-    //    device: &SharedDevice<S>,
-    //    payload: Self::Payload,
-    //) -> Result<AstarteDeviceDataEvent, crate::Error>;
-
-    //async fn send<'a>(
-    //    &self,
-    //    device: &SharedDevice<S>,
-    //    interface_name: &str,
-    //    interface_path: &MappingPath<'a>,
-    //    payload: Self::SendPayload,
-    //    timestamp: Option<Timestamp>,
-    //) -> Result<(), crate::Error>;
-
-    // send methods receives a validated wrapper type that already contains the interface and the path
     async fn send_individual<'a>(
         &self,
         mapping: MappingRef<'a, &'a Interface>,
@@ -89,7 +73,7 @@ pub(crate) trait Connection<S>: Send + Sync + Clone + 'static {
     async fn send_object(
         &self,
         object: ObjectRef<'_>,
-        path: &MappingPath,
+        path: &MappingPath<'_>,
         data: &HashMap<String, AstarteType>,
         timestamp: Option<Timestamp>,
     ) -> Result<(), crate::Error>;

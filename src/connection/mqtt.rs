@@ -88,12 +88,10 @@ impl Introspection {
     ) -> Vec<StoredProp> {
         properties
             .into_iter()
-            .filter(|prop| match interfaces.get_property(&prop.interface) {
-                Some(interface) => {
-                    interface.ownership() == Ownership::Device
-                        && interface.version_major() == prop.interface_major
-                }
-                None => false,
+            .filter(|prop| {
+                matches!(interfaces.get_property(&prop.interface),
+                Some(interface) if interface.ownership() == Ownership::Device
+                    && interface.version_major() == prop.interface_major)
             })
             .collect()
     }
@@ -384,6 +382,7 @@ where
         mapping: MappingRef<'_, &Interface>,
         payload: &Self::Payload,
     ) -> Result<(AstarteType, Option<Timestamp>), crate::Error> {
+        // TODO all validation that is independant from the transport should be moved outside and this function should just be called with a validated object
         payload::deserialize_individual(mapping, payload).map_err(|err| err.into())
     }
 
@@ -393,6 +392,7 @@ where
         path: &MappingPath<'_>,
         payload: &Self::Payload,
     ) -> Result<(HashMap<String, AstarteType>, Option<Timestamp>), crate::Error> {
+        // TODO all validation that is independant from the transport should be moved outside and this function should just be called with a validated object
         payload::deserialize_object(object, path, payload).map_err(|err| err.into())
     }
 
@@ -417,7 +417,7 @@ where
     async fn send_object(
         &self,
         object: ObjectRef<'_>,
-        path: &MappingPath,
+        path: &MappingPath<'_>,
         data: &HashMap<String, AstarteType>,
         timestamp: Option<Timestamp>,
     ) -> Result<(), crate::Error> {
@@ -468,17 +468,19 @@ impl Registry for Mqtt {
 mod test {
     use std::str::FromStr;
 
+    use mockall::predicate;
     use rumqttc::Packet;
     use tokio::sync::{mpsc, RwLock};
 
     use crate::{
         interfaces::Interfaces,
         shared::SharedDevice,
-        store::{memory::MemoryStore, wrapper::StoreWrapper},
+        store::{memory::MemoryStore, wrapper::StoreWrapper, PropertyStore},
+        types::AstarteType,
         Interface,
     };
 
-    use super::{AsyncClient, EventLoop, Mqtt, MqttEvent};
+    use super::{AsyncClient, Connection, EventLoop, Mqtt, MqttEvent};
 
     fn mock_mqtt_connection(client: AsyncClient, eventl: EventLoop) -> Mqtt {
         Mqtt::new("realm".to_string(), "device_id".to_string(), eventl, client)
@@ -512,42 +514,63 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_connack_client_response() {
-        let eventl = EventLoop::default();
+    async fn test_connect_client_response() {
+        let mut eventl = EventLoop::default();
         let mut client = AsyncClient::default();
+
+        // Connak resnponse for loop in connect method
+        eventl.expect_poll().returning(|| {
+            Ok(MqttEvent::Incoming(rumqttc::Packet::ConnAck(
+                rumqttc::ConnAck {
+                    session_present: false,
+                    code: rumqttc::ConnectReturnCode::Success,
+                },
+            )))
+        });
+
+        client
+            .expect_subscribe::<String>()
+            .with(
+                predicate::eq("realm/device_id/control/consumer/properties".to_string()),
+                predicate::always(),
+            )
+            .returning(|_topic, _qos| Ok(()));
 
         client
             .expect_subscribe()
-            .once()
+            .with(predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-datastream.ServerDatastream/#".to_string()), predicate::always())
             .returning(|_: String, _| Ok(()));
 
+        // Client id
         client
             .expect_publish::<String, String>()
-            .returning(|topic, _, _, _| {
-                // Client id
-                assert_eq!(topic, "realm/device_id");
+            .with(
+                predicate::eq("realm/device_id".to_string()),
+                predicate::always(),
+                predicate::always(),
+                predicate::always(),
+            )
+            .returning(|_, _, _, _| Ok(()));
 
-                Ok(())
-            });
-
+        // empty cache
         client
             .expect_publish::<String, &str>()
-            .returning(|topic, _, _, payload| {
-                // empty cache
-                assert_eq!(topic, "realm/device_id/control/emptyCache");
+            .with(
+                predicate::eq("realm/device_id/control/emptyCache".to_string()),
+                predicate::always(),
+                predicate::always(),
+                predicate::eq("1"),
+            )
+            .returning(|_, _, _, _| Ok(()));
 
-                assert_eq!(payload, "1");
-
-                Ok(())
-            });
-
-        client.expect_subscribe::<String>().returning(|topic, _qos| {
-            assert_eq!(topic, "realm/device_id/org.astarte-platform.rust.examples.individual-datastream.ServerDatastream/#");
-
-            Ok(())
-        });
+        // device property publish
+        client
+            .expect_publish::<String, Vec<u8>>()
+            .with(predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-properties.DeviceProperties/sensor1/name".to_string()), predicate::always(), predicate::always(), predicate::always())
+            .returning(|_, _, _, _| Ok(()));
 
         let interfaces = [
+            Interface::from_str(crate::test::DEVICE_PROPERTIES).unwrap(),
             Interface::from_str(crate::test::OBJECT_DEVICE_DATASTREAM).unwrap(),
             Interface::from_str(crate::test::INDIVIDUAL_SERVER_DATASTREAM).unwrap(),
         ];
@@ -567,6 +590,19 @@ mod test {
             tx,
         };
 
+        shared_device
+            .store
+            .store_prop(
+                Interface::from_str(crate::test::DEVICE_PROPERTIES)
+                    .unwrap()
+                    .interface_name(),
+                "/sensor1/name",
+                &AstarteType::String("temperature".to_string()),
+                0,
+            )
+            .await
+            .expect("Error while storing test property");
+
         mqtt_connection
             .connack(
                 &shared_device,
@@ -577,5 +613,7 @@ mod test {
             )
             .await
             .unwrap();
+
+        mqtt_connection.connect(&shared_device).await.unwrap();
     }
 }
