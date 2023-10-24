@@ -35,9 +35,7 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use tokio::{task, time};
 
-use astarte_device_sdk::builder::{DeviceBuilder, MqttConfig};
-use astarte_device_sdk::types::AstarteType;
-use astarte_device_sdk::Device;
+use astarte_device_sdk::prelude::*;
 
 mod mock_data_aggregate;
 mod mock_data_datastream;

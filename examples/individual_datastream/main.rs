@@ -21,12 +21,8 @@
 use std::time::SystemTime;
 
 use serde::Deserialize;
-
-use astarte_device_sdk::{
-    builder::{DeviceBuilder, MqttConfig},
-    error::Error,
-    Device,
-};
+use astarte_device_sdk::prelude::*;
+use astarte_device_sdk::prelude::error::Error;
 
 #[derive(Deserialize)]
 struct Config {

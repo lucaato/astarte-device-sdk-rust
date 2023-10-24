@@ -22,11 +22,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "derive")]
 use astarte_device_sdk::AstarteAggregate;
-use astarte_device_sdk::{
-    builder::{DeviceBuilder, MqttConfig},
-    error::Error,
-    Device,
-};
+use astarte_device_sdk::prelude::*;
+use astarte_device_sdk::prelude::error::Error;
 #[cfg(not(feature = "derive"))]
 use astarte_device_sdk_derive::AstarteAggregate;
 
