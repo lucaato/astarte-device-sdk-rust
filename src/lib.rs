@@ -167,7 +167,10 @@ pub struct AstarteDeviceSdk<S, C> {
 }
 
 impl<S, C> AstarteDeviceSdk<S, C> {
-    pub(crate) fn new(interfaces: Interfaces, store: S, connection: C, tx: EventSender) -> Self {
+    pub(crate) fn new(interfaces: Interfaces, store: S, connection: C, tx: EventSender) -> Self
+    where
+        S: PropertyStore,
+    {
         Self {
             shared: Arc::new(SharedDevice {
                 interfaces: RwLock::new(interfaces),
@@ -176,14 +179,6 @@ impl<S, C> AstarteDeviceSdk<S, C> {
             }),
             connection,
         }
-    }
-
-    pub(crate) async fn connect(&self) -> Result<(), Error>
-    where
-        S: PropertyStore,
-        C: Connection<S> + Sync,
-    {
-        self.connection.connect(&self.shared).await
     }
 
     async fn handle_event(
@@ -852,6 +847,8 @@ mod test {
     use crate::properties::tests::PROPERTIES_PAYLOAD;
     use crate::properties::PropAccess;
     use crate::store::memory::MemoryStore;
+    use crate::store::wrapper::StoreWrapper;
+    use crate::store::PropertyStore;
     use crate::{self as astarte_device_sdk, Device, EventReceiver, Interface, InterfaceRegistry};
     use astarte_device_sdk::AstarteAggregate;
     use astarte_device_sdk::{types::AstarteType, Aggregation, AstarteDeviceSdk};
@@ -886,12 +883,13 @@ mod test {
     ) -> (AstarteDeviceSdk<S, Mqtt>, EventReceiver)
     where
         I: IntoIterator<Item = Interface>,
+        S: PropertyStore,
     {
         let (tx, rx) = mpsc::channel(50);
 
         let sdk = AstarteDeviceSdk::new(
             Interfaces::from_iter(interfaces),
-            store,
+            StoreWrapper::new(store),
             Mqtt::new(
                 "realm".to_string(),
                 "device_id".to_string(),

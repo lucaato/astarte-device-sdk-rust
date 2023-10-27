@@ -25,7 +25,7 @@ use bytes::Bytes;
 use log::{debug, error, info, trace, warn};
 use once_cell::sync::OnceCell;
 use rumqttc::{Event as MqttEvent, Packet};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 #[cfg(test)]
 pub(crate) use crate::mock::{MockAsyncClient as AsyncClient, MockEventLoop as EventLoop};
@@ -43,7 +43,7 @@ use crate::{
     properties,
     retry::DelayedPoll,
     shared::SharedDevice,
-    store::{PropertyStore, StoredProp},
+    store::{wrapper::StoreWrapper, PropertyStore, StoredProp},
     topic::{parse_topic, ParsedTopic},
     types::AstarteType,
     Interface, Timestamp,
@@ -87,23 +87,18 @@ impl Mqtt {
         }
     }
 
-    async fn connack<S>(
+    async fn connack(
         &self,
-        device: &SharedDevice<S>,
-        connack: rumqttc::ConnAck,
-    ) -> Result<(), crate::Error>
-    where
-        S: PropertyStore,
-    {
-        if connack.session_present {
-            return Ok(());
-        }
-
-        let Introspection {
+        Introspection {
             interfaces,
             server_interfaces,
             device_properties,
-        } = Introspection::from_device(device).await?;
+        }: Introspection,
+        connack: rumqttc::ConnAck,
+    ) -> Result<(), crate::Error> {
+        if connack.session_present {
+            return Ok(());
+        }
 
         self.subscribe_server_interfaces(&server_interfaces).await?;
         self.send_introspection(interfaces).await?;
@@ -256,14 +251,14 @@ impl Deref for Mqtt {
 impl<S> Connection<S> for Mqtt {
     type Payload = Bytes;
 
-    async fn connect(&self, device: &SharedDevice<S>) -> Result<(), crate::Error>
+    async fn connect(&self, introspection: Introspection) -> Result<(), crate::Error>
     where
         S: PropertyStore,
     {
         loop {
             match self.poll().await? {
                 rumqttc::Packet::ConnAck(connack) => {
-                    self.connack(device, connack).await?;
+                    self.connack(introspection, connack).await?;
 
                     return Ok(());
                 }
@@ -285,7 +280,13 @@ impl<S> Connection<S> for Mqtt {
         // Keep consuming packets until we have an actual "data" event
         loop {
             match self.poll().await? {
-                rumqttc::Packet::ConnAck(connack) => self.connack(device, connack).await?,
+                rumqttc::Packet::ConnAck(connack) => {
+                    self.connack(
+                        Introspection::from(&device.interfaces, &device.store).await?,
+                        connack,
+                    )
+                    .await?
+                }
                 rumqttc::Packet::Publish(publish) => {
                     let purge_topic = PURGE_PROPERTIES_TOPIC.get_or_init(|| {
                         format!("{}/control/consumer/properties", self.client_id())
@@ -409,7 +410,7 @@ impl Registry for Mqtt {
     }
 }
 
-struct Introspection {
+pub(crate) struct Introspection {
     interfaces: String,
     server_interfaces: Vec<String>,
     device_properties: Vec<StoredProp>,
@@ -424,15 +425,33 @@ impl Introspection {
             .collect()
     }
 
-    async fn from_device<S>(
-        device: &SharedDevice<S>,
+    pub(crate) async fn from<S>(
+        interfaces: &RwLock<Interfaces>,
+        store: &StoreWrapper<S>,
     ) -> Result<Self, crate::store::error::StoreError>
     where
         S: PropertyStore,
     {
-        let device_properties = device.store.device_props().await?;
-        let interfaces = device.interfaces.read().await;
+        let device_properties = store.device_props().await?;
+        let interfaces = interfaces.read().await;
 
+        let server_interfaces = Self::filter_server_interfaces(&interfaces);
+
+        Ok(Self {
+            interfaces: interfaces.get_introspection_string(),
+            server_interfaces,
+            device_properties,
+        })
+    }
+
+    pub(crate) async fn from_unlocked<S>(
+        interfaces: &Interfaces,
+        store: &StoreWrapper<S>,
+    ) -> Result<Self, crate::store::error::StoreError>
+    where
+        S: PropertyStore,
+    {
+        let device_properties = store.device_props().await?;
         let server_interfaces = Self::filter_server_interfaces(&interfaces);
 
         Ok(Self {
@@ -464,6 +483,7 @@ mod test {
     use tokio::sync::{mpsc, RwLock};
 
     use crate::{
+        connection::mqtt::Introspection,
         interfaces::Interfaces,
         shared::SharedDevice,
         store::{memory::MemoryStore, wrapper::StoreWrapper, PropertyStore, StoredProp},
@@ -593,17 +613,19 @@ mod test {
             .await
             .expect("Error while storing test property");
 
-        mqtt_connection
-            .connack(
-                &shared_device,
-                rumqttc::ConnAck {
-                    session_present: false,
-                    code: rumqttc::ConnectReturnCode::Success,
-                },
-            )
-            .await
-            .unwrap();
+        let introspection =
+            Introspection::from(&shared_device.interfaces, &shared_device.store).await?;
+        //mqtt_connection
+        //    .connack(
+        //        Introspection::from(&shared_device.interfaces, &shared_device.store),
+        //        rumqttc::ConnAck {
+        //            session_present: false,
+        //            code: rumqttc::ConnectReturnCode::Success,
+        //        },
+        //    )
+        //    .await
+        //    .unwrap();
 
-        mqtt_connection.connect(&shared_device).await.unwrap();
+        mqtt_connection.connect(introspection).await.unwrap();
     }
 }

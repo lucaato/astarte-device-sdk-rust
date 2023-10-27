@@ -21,17 +21,21 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use tokio::sync::RwLock;
 
 use crate::{
     interface::{
         mapping::path::MappingPath,
         reference::{MappingRef, ObjectRef},
     },
+    interfaces::Interfaces,
     shared::SharedDevice,
-    store::PropertyStore,
+    store::{wrapper::StoreWrapper, PropertyStore},
     types::AstarteType,
     Interface, Timestamp,
 };
+
+use self::mqtt::Introspection;
 
 pub mod mqtt;
 
@@ -49,7 +53,7 @@ pub(crate) trait Connection<S>: Clone {
     type Payload: Send + Sync + 'static;
 
     /// Method called imediately after the Connection gets created
-    async fn connect(&self, device: &SharedDevice<S>) -> Result<(), crate::Error>
+    async fn connect(&self, introspection: Introspection) -> Result<(), crate::Error>
     where
         S: PropertyStore;
 
