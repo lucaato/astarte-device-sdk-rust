@@ -169,6 +169,7 @@ pub struct AstarteDeviceSdk<S, C> {
 impl<S, C> AstarteDeviceSdk<S, C> {
     pub(crate) fn new(interfaces: Interfaces, store: S, connection: C, tx: EventSender) -> Self
     where
+        C: Connection<S>,
         S: PropertyStore,
     {
         Self {
@@ -889,7 +890,7 @@ mod test {
 
         let sdk = AstarteDeviceSdk::new(
             Interfaces::from_iter(interfaces),
-            StoreWrapper::new(store),
+            store,
             Mqtt::new(
                 "realm".to_string(),
                 "device_id".to_string(),

@@ -614,7 +614,7 @@ mod test {
             .expect("Error while storing test property");
 
         let introspection =
-            Introspection::from(&shared_device.interfaces, &shared_device.store).await?;
+            Introspection::from(&shared_device.interfaces, &shared_device.store).await.unwrap();
         //mqtt_connection
         //    .connack(
         //        Introspection::from(&shared_device.interfaces, &shared_device.store),

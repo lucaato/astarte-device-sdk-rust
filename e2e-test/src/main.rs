@@ -35,7 +35,7 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use tokio::{task, time};
 
-use astarte_device_sdk::builder::{DeviceBuilder, MqttConfig};
+use astarte_device_sdk::builder::{DeviceBuilder, MqttConfig, DeviceSdkConnect};
 use astarte_device_sdk::types::AstarteType;
 use astarte_device_sdk::Device;
 
@@ -131,7 +131,7 @@ async fn main() {
         &test_cfg.pairing_url,
     );
 
-    let device_builder = DeviceBuilder::new()
+    let device_builder = DeviceBuilder::volatile_device_builder()
         .interface_directory(&test_cfg.interfaces_fld.to_string_lossy())
         .unwrap();
 
@@ -140,7 +140,7 @@ async fn main() {
         mqtt_config.ignore_ssl_errors();
     }
 
-    let (mut device, mut rx_events) = device_builder.connect_mqtt(mqtt_config).await.unwrap();
+    let (mut device, mut rx_events) = device_builder.connect(mqtt_config).await.unwrap();
     let rx_data_ind_datastream = Arc::new(Mutex::new(HashMap::new()));
     let rx_data_agg_datastream = Arc::new(Mutex::new((String::new(), HashMap::new())));
     let rx_data_ind_prop = Arc::new(Mutex::new((String::new(), HashMap::new())));

@@ -84,50 +84,60 @@ pub enum BuilderError {
 }
 
 #[async_trait]
-pub trait BuilderConnect<S, C, Conn> {
-    async fn connect(self) -> Result<DeviceBuilder<S, Conn>, crate::Error>;
-}
-
-pub trait BuilderBuild<S, C> {
-    fn build(self) -> (AstarteDeviceSdk<S, C>, EventReceiver);
+pub trait DeviceSdkConnect<S, C>
+where
+    C: ConnectionConfig + Send,
+    S: PropertyStore,
+{
+    async fn connect(self, config: C) -> Result<DeviceBuilder<S, C::Con>, crate::Error>;
 }
 
 #[async_trait]
-impl<S, C, Conn> BuilderConnect<S, C, Conn> for DeviceBuilder<S, C>
+pub trait DeviceSdkBuild<S, C>
 where
+    C: ConnectionConfig + Send,
     S: PropertyStore,
-    Conn: Connection<S> + Send + Sync,
-    C: ConnectionConfig<Conn> + Send,
 {
-    async fn connect(self) -> Result<DeviceBuilder<S, Conn>, crate::Error> {
-        let connection = self.connection.build().await?;
+    fn build(self) -> (AstarteDeviceSdk<S, C::Con>, EventReceiver);
+}
+
+#[async_trait]
+impl<S, C> DeviceSdkConnect<S, C> for DeviceBuilder<S, C::Con>
+where
+    C: ConnectionConfig + Send + 'static,
+    C::Con: Connection<S> + Send + Sync,
+    S: PropertyStore + Send,
+{
+    async fn connect(self, config: C) -> Result<DeviceBuilder<S, C::Con>, crate::Error> {
+        let connection = config.build(self.channel_size).await?;
 
         // wrapping and unwrapping should be a no op after compilation
-        let store_wrapper = StoreWrapper::new(self.store);
-
         connection
-            .connect(Introspection::from_unlocked(&self.interfaces, &store_wrapper).await?)
+            .connect(Introspection::from_unlocked(&self.interfaces, &self.store_wrapper).await?)
             .await?;
 
-        let StoreWrapper { store } = store_wrapper;
-
         Ok(DeviceBuilder {
+            channel_size: self.channel_size,
             interfaces: self.interfaces,
             connection,
-            store,
+            store_wrapper: self.store_wrapper,
         })
     }
 }
 
-impl<S, C> BuilderBuild<S, C> for DeviceBuilder<S, C>
+impl<S, C> DeviceSdkBuild<S, C> for DeviceBuilder<S, C::Con>
 where
-    S: PropertyStore,
-    C: Connection<S>,
+    C: ConnectionConfig + Send,
+    C::Con: Connection<S> + Send,
+    S: PropertyStore + Send,
 {
-    fn build(self) -> (AstarteDeviceSdk<S, C>, EventReceiver) {
-        let (tx, rx) = mpsc::channel(MQTT_CHANNEL_SIZE);
+    fn build(self) -> (AstarteDeviceSdk<S, C::Con>, EventReceiver)
+    where
+        C: ConnectionConfig + Send,
+    {
+        let (tx, rx) = mpsc::channel(self.channel_size);
 
-        let device = AstarteDeviceSdk::new(self.interfaces, self.store, self.connection, tx);
+        let device = AstarteDeviceSdk::new(self.interfaces, self.store_wrapper.store, self.connection, tx);
 
         (device, rx)
     }
@@ -135,15 +145,17 @@ where
 
 /// Structure used to store the configuration options for an instance of
 /// [AstarteDeviceSdk].
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct DeviceBuilder<S, C> {
+    pub(crate) channel_size: usize,
     pub(crate) interfaces: Interfaces,
     pub(crate) connection: C,
-    pub(crate) store: S,
+    pub(crate) store_wrapper: StoreWrapper<S>,
 }
 
 impl DeviceBuilder<(), ()> {
     /// Create a new instance of the DeviceBuilder.
+    /// Has a default [`DeviceBuilder::channel_size`] that equals to [`MQTT_CHANNEL_SIZE`].
     ///
     /// ```no_run
     /// use astarte_device_sdk::builder::{DeviceBuilder, MqttConfig};
@@ -158,26 +170,28 @@ impl DeviceBuilder<(), ()> {
     /// ```
     pub fn new() -> Self {
         Self {
+            channel_size: MQTT_CHANNEL_SIZE,
             interfaces: Interfaces::new(),
             connection: (),
-            store: (),
+            store_wrapper: StoreWrapper::new(()),
         }
     }
 }
 
-impl<S, C> DeviceBuilder<S, C> {
-    pub fn with<Conn>(self, store: S, connection_config: C) -> Self
-    where
-        S: PropertyStore,
-        C: ConnectionConfig<Conn>,
-    {
-        DeviceBuilder {
-            interfaces: self.interfaces,
-            connection: connection_config,
-            store,
-        }
+impl DeviceBuilder<MemoryStore, ()> {
+    /// Returns a default configuration for a builder.
+    ///
+    /// This builder constructs an [`AstarteDeviceSdk`] backed by a [`MemoryStore`].
+    /// As a consequence values will only be stored in working memory and not on disk.
+    /// Useful for being up and running with an [`AstarteDeviceSdk`] but since no
+    /// data is persisted on disk its usage in production should be considered carefully.
+    pub fn volatile_device_builder() -> DeviceBuilder<MemoryStore, ()> {
+        DeviceBuilder::new()
+            .store(MemoryStore::new())
     }
+}
 
+impl<S> DeviceBuilder<S, ()> {
     /// Add a single interface from the provided `.json` file.
     ///
     /// It will validate that the interfaces are the same, or a newer version of the interfaces
@@ -199,6 +213,32 @@ impl<S, C> DeviceBuilder<S, C> {
             .iter()
             .try_fold(self, |acc, path| acc.interface_file(path))
     }
+
+    /// This method configures the bounded channel size.
+    ///
+    /// This method configures the bounded channel size *both* for the rumqttc AsyncClient
+    /// and the internal [`mpsc::Channel`] used by the [`AstarteDeviceSdk`] to send
+    /// events data to the receiver.
+    pub fn channel_size(mut self, size: usize) -> Self {
+        self.channel_size = size;
+
+        self
+    }
+
+    /// Set the backing storage for the device.
+    ///
+    /// This will store and retrieve the device's properties.
+    pub fn store<T>(self, store: T) -> DeviceBuilder<T, ()>
+    where
+        T: PropertyStore,
+    {
+        DeviceBuilder {
+            channel_size: self.channel_size,
+            interfaces: self.interfaces,
+            connection: self.connection,
+            store_wrapper: StoreWrapper::new(store),
+        }
+    }
 }
 
 impl<S, C> Debug for DeviceBuilder<S, C> {
@@ -208,6 +248,12 @@ impl<S, C> Debug for DeviceBuilder<S, C> {
             // We manually implement Debug for the store, so we can avoid have a trait bound on
             // `S` to implement [Display].
             .finish_non_exhaustive()
+    }
+}
+
+impl Default for DeviceBuilder<(), ()> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -268,18 +314,22 @@ impl MqttConfig {
 }
 
 #[async_trait]
-pub trait ConnectionConfig<C> {
-    async fn build(self) -> Result<C, crate::Error>;
+pub trait ConnectionConfig {
+    type Con;
+
+    async fn build(self, channel_size: usize) -> Result<Self::Con, crate::Error>;
 }
 
 #[async_trait]
-impl ConnectionConfig<Mqtt> for MqttConfig {
-    async fn build(self) -> Result<Mqtt, crate::Error> {
+impl ConnectionConfig for MqttConfig {
+    type Con = Mqtt;
+
+    async fn build(self, channel_size: usize) -> Result<Self::Con, crate::Error> {
         let mqtt_options = pairing::get_transport_config(&self).await?;
 
         debug!("{:#?}", mqtt_options);
 
-        let (client, eventloop) = AsyncClient::new(mqtt_options, MQTT_CHANNEL_SIZE);
+        let (client, eventloop) = AsyncClient::new(mqtt_options, channel_size);
 
         Ok(Mqtt::new(self.realm, self.device_id, eventloop, client))
     }
