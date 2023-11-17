@@ -89,7 +89,7 @@ impl<'a> Display for ClientId<'a> {
     }
 }
 
-/// Shared data of the connection, this struct is internal to the [`Mqtt`] connection
+/// Shared data of the mqtt connection, this struct is internal to the [`Mqtt`] connection
 /// where is wrapped in an arc to share an immutable reference across tasks.
 pub struct SharedMqtt {
     realm: String,
@@ -442,18 +442,18 @@ impl Receive for Mqtt {
     fn deserialize_individual(
         &self,
         mapping: MappingRef<'_, &Interface>,
-        payload: &Self::Payload,
+        payload: Self::Payload,
     ) -> Result<(AstarteType, Option<Timestamp>), crate::Error> {
-        payload::deserialize_individual(mapping, payload).map_err(|err| err.into())
+        payload::deserialize_individual(mapping, &payload).map_err(|err| err.into())
     }
 
     fn deserialize_object(
         &self,
         object: ObjectRef,
         path: &MappingPath<'_>,
-        payload: &Self::Payload,
+        payload: Self::Payload,
     ) -> Result<(HashMap<String, AstarteType>, Option<Timestamp>), crate::Error> {
-        payload::deserialize_object(object, path, payload).map_err(|err| err.into())
+        payload::deserialize_object(object, path, &payload).map_err(|err| err.into())
     }
 }
 
@@ -562,6 +562,8 @@ pub enum MqttConnectionError {
     Pairing(#[from] PairingError),
     #[error(transparent)]
     Pki(#[from] webpki::Error),
+    #[error("Error while loading session data to perform the mqtt connection: {0}")]
+    PropLoad(#[from] StoreError),
 }
 
 /// Configuration for the mqtt connection
@@ -651,8 +653,9 @@ impl Debug for MqttConfig {
 #[async_trait]
 impl ConnectionConfig for MqttConfig {
     type Con = Mqtt;
+    type Err = crate::Error;
 
-    async fn connect<S, C>(self, builder: &DeviceBuilder<S, C>) -> Result<Self::Con, crate::Error>
+    async fn connect<S, C>(self, builder: &DeviceBuilder<S, C>) -> Result<Self::Con, Self::Err>
     where
         S: PropertyStore,
         C: Send + Sync,
