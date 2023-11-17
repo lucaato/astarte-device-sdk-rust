@@ -44,6 +44,8 @@ use crate::{
 };
 
 pub mod mqtt;
+//#[cfg(feature="message-hub")]
+pub mod grpc;
 
 /// Holds generic event data such as interface name and path
 /// The payload must be deserialized after verification with the
@@ -83,7 +85,7 @@ pub(crate) trait Receive {
     fn deserialize_individual(
         &self,
         mappig: MappingRef<'_, &Interface>,
-        payload: &Self::Payload,
+        payload: Self::Payload,
     ) -> Result<(AstarteType, Option<Timestamp>), crate::Error>;
 
     /// Deserializes a received payload to an aggregate object
@@ -91,7 +93,7 @@ pub(crate) trait Receive {
         &self,
         object: ObjectRef,
         path: &MappingPath<'_>,
-        payload: &Self::Payload,
+        payload: Self::Payload,
     ) -> Result<(HashMap<String, AstarteType>, Option<Timestamp>), crate::Error>;
 }
 

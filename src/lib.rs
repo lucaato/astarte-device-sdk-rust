@@ -20,6 +20,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod builder;
+pub mod convert;
 pub mod crypto;
 pub mod error;
 pub mod event;
@@ -68,7 +69,7 @@ use crate::store::wrapper::StoreWrapper;
 use crate::store::{PropertyStore, StoredProp};
 use crate::transport::{Publish, Receive, ReceivedEvent, Register};
 use crate::types::{AstarteType, TypeError};
-use crate::validate::{validate_individual, validate_object};
+use crate::validate::{ValidatedIndividual, ValidatedObject};
 
 /// A **trait** required by all data to be sent using
 /// [send_object()][crate::AstarteDeviceSdk::send_object] and
@@ -185,19 +186,15 @@ impl<S, C> AstarteDeviceSdk<S, C> {
 
     async fn handle_event(
         &self,
-        connection_event: &ReceivedEvent<C::Payload>,
+        interface: &str,
+        path: &str,
+        payload: C::Payload,
     ) -> Result<Aggregation, crate::Error>
     where
         S: PropertyStore,
         C: Receive + Sync,
     {
-        let ReceivedEvent {
-            interface,
-            path,
-            payload,
-        } = connection_event;
-
-        let path = MappingPath::try_from(path.as_str())?;
+        let path = MappingPath::try_from(path)?;
 
         let interfaces = self.interfaces.read().await;
         let interface = interfaces.get(interface).ok_or_else(|| {
@@ -226,7 +223,7 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         &self,
         interface: &Interface,
         path: &MappingPath<'a>,
-        payload: &C::Payload,
+        payload: C::Payload,
     ) -> Result<(Aggregation, Option<chrono::DateTime<chrono::Utc>>), Error>
     where
         S: PropertyStore,
@@ -267,7 +264,7 @@ impl<S, C> AstarteDeviceSdk<S, C> {
         &self,
         interface: &Interface,
         path: &MappingPath<'a>,
-        payload: &C::Payload,
+        payload: C::Payload,
     ) -> Result<(Aggregation, Option<chrono::DateTime<chrono::Utc>>), Error>
     where
         S: PropertyStore,
@@ -382,7 +379,8 @@ impl<S, C> AstarteDeviceSdk<S, C> {
             return Ok(());
         }
 
-        let validated = validate_individual(mapping, path, &individual, timestamp)?;
+        let validated =
+            ValidatedIndividual::try_validate(mapping, path, individual.clone(), timestamp)?;
 
         self.connection.send_individual(validated).await?;
 
@@ -438,7 +436,7 @@ impl<S, C> AstarteDeviceSdk<S, C> {
 
         let aggregate = data.astarte_aggregate()?;
 
-        let validated = validate_object(object, path, &aggregate, timestamp)?;
+        let validated = ValidatedObject::try_validate(object, path, aggregate, timestamp)?;
 
         self.connection.send_object(validated).await
     }
@@ -744,18 +742,24 @@ where
 
     async fn handle_events(&mut self) -> Result<(), crate::Error> {
         loop {
-            let event_payload = self.connection.next_event(&self.shared).await?;
+            let ReceivedEvent {
+                interface,
+                path,
+                payload,
+            } = self.connection.next_event(&self.shared).await?;
+
             let device = self.clone();
 
             tokio::spawn(async move {
-                let data = device
-                    .handle_event(&event_payload)
-                    .await
-                    .map(|aggregation| AstarteDeviceDataEvent {
-                        interface: event_payload.interface,
-                        path: event_payload.path,
-                        data: aggregation,
-                    });
+                let data =
+                    device
+                        .handle_event(&interface, &path, payload)
+                        .await
+                        .map(|aggregation| AstarteDeviceDataEvent {
+                            interface,
+                            path,
+                            data: aggregation,
+                        });
 
                 device.tx.send(data).await.expect("Channel dropped")
             });
