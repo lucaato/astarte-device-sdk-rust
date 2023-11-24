@@ -50,6 +50,7 @@ pub mod grpc;
 /// Holds generic event data such as interface name and path
 /// The payload must be deserialized after verification with the
 /// specific [`Connection::deserialize_individual`] or [`Connection::serialize_individual`]
+#[derive(Debug)]
 pub(crate) struct ReceivedEvent<P> {
     pub(crate) interface: String,
     pub(crate) path: String,
@@ -116,4 +117,47 @@ pub(crate) trait Register {
         interfaces: &Interfaces,
         removed_interface: Interface,
     ) -> Result<(), crate::Error>;
+}
+
+#[cfg(test)]
+mod test {
+    use tokio::sync::RwLock;
+
+    use crate::{
+        interface::mapping::path::MappingPath, interfaces::Interfaces, shared::SharedDevice,
+        store::memory::MemoryStore, validate::ValidatedObject, AstarteAggregate, EventSender,
+        Interface,
+    };
+
+    pub(crate) fn mock_shared_device(
+        interfaces: Interfaces,
+        tx: EventSender,
+    ) -> SharedDevice<MemoryStore> {
+        SharedDevice {
+            interfaces: RwLock::new(interfaces),
+            store: crate::store::wrapper::StoreWrapper::new(MemoryStore::new()),
+            tx,
+        }
+    }
+
+    pub(crate) fn mock_validate_object<'a, D>(
+        interface: &'a Interface,
+        path: &'a MappingPath<'a>,
+        data: D,
+        timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<ValidatedObject<'a>, crate::Error>
+    where
+        D: AstarteAggregate + Send,
+    {
+        let object = interface
+            .as_object_ref()
+            .ok_or_else(|| crate::Error::Aggregation {
+                exp: crate::interface::Aggregation::Object,
+                got: interface.aggregation(),
+            })?;
+
+        let aggregate = data.astarte_aggregate()?;
+
+        ValidatedObject::try_validate(object, path, aggregate, timestamp).map_err(|uve| uve.into())
+    }
 }

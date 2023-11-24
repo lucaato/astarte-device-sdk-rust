@@ -82,6 +82,8 @@ env_logger = { workspace = true }
 mockall = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tower = { workspace = true }
 
 [features]
 derive = ["dep:astarte-device-sdk-derive"]
@@ -125,7 +127,9 @@ syn = "2.0.0"
 tempfile = "3.6.0"
 thiserror = "1.0.35"
 tokio = "1.18.0"
+tokio-stream = "0.1.14"
 tonic = "0.10.2"
+tower = "0.4.13"
 url = "2.2.2"
 uuid = "1.0.0"
 webpki = "0.22.0"

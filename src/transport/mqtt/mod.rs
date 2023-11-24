@@ -42,9 +42,6 @@ use rumqttc::{Event as MqttEvent, Packet};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
-pub use self::pairing::PairingError;
-pub use self::payload::PayloadError;
-
 #[cfg(test)]
 pub(crate) use crate::mock::{MockAsyncClient as AsyncClient, MockEventLoop as EventLoop};
 use crate::{
@@ -68,9 +65,12 @@ use crate::{
 #[cfg(not(test))]
 pub(crate) use rumqttc::{AsyncClient, EventLoop};
 
-use payload::Payload;
-
 use super::{Publish, Receive, ReceivedEvent, Register};
+
+pub use self::pairing::PairingError;
+pub use self::payload::PayloadError;
+
+use payload::Payload;
 
 /// Borrowing wrapper for the client id
 ///
@@ -682,12 +682,12 @@ pub(crate) mod test {
 
     use mockall::predicate;
     use rumqttc::Packet;
-    use tokio::sync::{mpsc, RwLock};
+    use tokio::sync::mpsc;
 
     use crate::{
         interfaces::Interfaces,
-        shared::SharedDevice,
-        store::{memory::MemoryStore, wrapper::StoreWrapper, PropertyStore, StoredProp},
+        store::{PropertyStore, StoredProp},
+        transport::test::mock_shared_device,
         types::AstarteType,
         Interface,
     };
@@ -790,13 +790,7 @@ pub(crate) mod test {
         let (tx, _rx) = mpsc::channel(2);
 
         let mqtt_connection = mock_mqtt_connection(client, eventl);
-        let shared_device = SharedDevice {
-            interfaces: RwLock::new(Interfaces::from_iter(interfaces)),
-            store: StoreWrapper {
-                store: MemoryStore::new(),
-            },
-            tx,
-        };
+        let shared_device = mock_shared_device(Interfaces::from_iter(interfaces), tx);
 
         let interface = Interface::from_str(crate::test::DEVICE_PROPERTIES).unwrap();
 

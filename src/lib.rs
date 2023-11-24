@@ -20,7 +20,6 @@
 #![doc = include_str!("../README.md")]
 
 pub mod builder;
-pub mod convert;
 pub mod crypto;
 pub mod error;
 pub mod event;
