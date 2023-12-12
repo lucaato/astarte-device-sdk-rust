@@ -52,6 +52,7 @@ pub use rumqttc;
 use async_trait::async_trait;
 use log::{debug, error, info, trace, warn};
 use tokio::sync::{mpsc, RwLock};
+use transport::Disconnect;
 
 /// Re-exported internal structs
 pub use crate::event::FromEvent;
@@ -663,6 +664,11 @@ pub trait Client {
 }
 
 #[async_trait]
+trait ClientDisconnect {
+    async fn disconnect(self);
+}
+
+#[async_trait]
 impl<S, C> Client for AstarteDeviceSdk<S, C>
 where
     S: PropertyStore,
@@ -810,6 +816,19 @@ where
         }
 
         self.remove_properties_from_store(interface_name).await
+    }
+}
+
+#[async_trait]
+impl<S, C> ClientDisconnect for AstarteDeviceSdk<S, C>
+where
+    S: PropertyStore,
+    C: Disconnect + Send,
+{
+    async fn disconnect(self) {
+        if let Err(e) = self.connection.disconnect().await {
+            warn!("Could not close the connection gracefully: {}", e);
+        }
     }
 }
 

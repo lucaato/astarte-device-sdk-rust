@@ -119,14 +119,24 @@ pub(crate) trait Register {
     ) -> Result<(), crate::Error>;
 }
 
+#[async_trait]
+pub trait Disconnect {
+    /// User callable api to gracefully disconnect from the transport
+    async fn disconnect(self) -> Result<(), crate::Error>;
+}
+
 #[cfg(test)]
 mod test {
     use tokio::sync::RwLock;
 
     use crate::{
-        interface::mapping::path::MappingPath, interfaces::Interfaces, shared::SharedDevice,
-        store::memory::MemoryStore, validate::ValidatedObject, AstarteAggregate, EventSender,
-        Interface,
+        interface::{mapping::path::MappingPath, reference::MappingRef},
+        interfaces::Interfaces,
+        shared::SharedDevice,
+        store::memory::MemoryStore,
+        types::{AstarteType, TypeError},
+        validate::{ValidatedIndividual, ValidatedObject},
+        AstarteAggregate, EventSender, Interface,
     };
 
     pub(crate) fn mock_shared_device(
@@ -159,5 +169,20 @@ mod test {
         let aggregate = data.astarte_aggregate()?;
 
         ValidatedObject::try_validate(object, path, aggregate, timestamp).map_err(|uve| uve.into())
+    }
+
+    pub(crate) fn mock_validate_individual<'a, D>(
+        mapping_ref: MappingRef<'a, &'a Interface>,
+        path: &'a MappingPath<'a>,
+        data: D,
+        timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<ValidatedIndividual<'a>, crate::Error>
+    where
+        D: TryInto<AstarteType> + Send,
+    {
+        let individual = data.try_into().map_err(|_| TypeError::Conversion)?;
+
+        ValidatedIndividual::try_validate(mapping_ref, path, individual, timestamp)
+            .map_err(|uve| uve.into())
     }
 }

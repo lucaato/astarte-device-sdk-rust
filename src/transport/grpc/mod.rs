@@ -1,3 +1,29 @@
+/*
+ * This file is part of Astarte.
+ *
+ * Copyright 2023 SECO Mind Srl
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+//! # Astarte GRPC Transport Module
+//!
+//! This module provides an implementation of the Astarte transport layer using the GRPC protocol.
+//! It defines the `Grpc` struct, which represents a GRPC connection, along with traits for publishing,
+//! receiving, and registering interfaces.
+
 pub mod convert;
 
 use std::{collections::HashMap, ops::Deref, sync::Arc};
@@ -23,7 +49,7 @@ use crate::{
     Interface, Timestamp,
 };
 
-use super::{Publish, Receive, ReceivedEvent, Register};
+use super::{Disconnect, Publish, Receive, ReceivedEvent, Register};
 
 use self::convert::map_values_to_astarte_type;
 
@@ -40,8 +66,8 @@ pub enum GrpcTransportError {
     DeserializationExpectedIndividual,
     #[error("Attempting to deserialize object message but got an individual value")]
     DeserializationExpectedObject,
-    //#[error("The detach synchronous call during drop failed: {0}")]
-    //DetachDuringDrop(#[from] std::io::Error),
+    #[error("Graceful close of the grpc channel failed, the Arc is still shared")]
+    GracefulClose,
 }
 
 /// Shared data of the grpc connection, this struct is internal to the [`Grpc`] connection
@@ -255,6 +281,24 @@ impl Register for Grpc {
     }
 }
 
+#[async_trait]
+impl Disconnect for Grpc {
+    async fn disconnect(mut self) -> Result<(), crate::Error> {
+        if let Some(SharedGrpc {
+            ref mut client,
+            stream: _stream,
+            uuid,
+        }) = Arc::get_mut(&mut self.shared)
+        {
+            Self::try_detach(client.get_mut(), uuid.to_string())
+                .await
+                .map_err(|e| e.into())
+        } else {
+            Err(GrpcTransportError::GracefulClose.into())
+        }
+    }
+}
+
 /*
 /// Implemented to correctly detach the device from the message hub
 ///
@@ -347,9 +391,14 @@ mod test {
     use uuid::{uuid, Uuid};
 
     use crate::{
-        interface::mapping::path::MappingPath, interfaces::Interfaces, store::memory::MemoryStore,
-        transport::test::mock_validate_object, types::AstarteType, Aggregation, AstarteAggregate,
-        AstarteDeviceDataEvent, AstarteDeviceSdk, Client, EventReceiver, Interface,
+        interface::mapping::path::MappingPath,
+        interfaces::Interfaces,
+        transport::{
+            test::{mock_validate_individual, mock_validate_object},
+            Disconnect,
+        },
+        types::AstarteType,
+        Aggregation, AstarteAggregate, AstarteDeviceDataEvent, Interface,
     };
 
     use super::super::{test::mock_shared_device, Publish, Receive, ReceivedEvent};
@@ -512,26 +561,6 @@ mod test {
         Ok(Grpc::new(message_hub_client, stream, ID))
     }
 
-    async fn mock_astarte_device_sdk_grpc<I>(
-        client: MessageHubClient<tonic::transport::Channel>,
-        interfaces: I,
-    ) -> (AstarteDeviceSdk<MemoryStore, Grpc>, EventReceiver)
-    where
-        I: IntoIterator<Item = Interface>,
-    {
-        let (tx, rx) = mpsc::channel(50);
-        let interfaces = Interfaces::from_iter(interfaces);
-
-        println!("Creating client and server");
-        let connection = mock_astarte_grpc_client(client, &interfaces)
-            .await
-            .expect("Could not construct a test connection");
-
-        let sdk = AstarteDeviceSdk::new(interfaces, MemoryStore::new(), connection, tx);
-
-        (sdk, rx)
-    }
-
     struct TestServerChannels {
         server_response_sender:
             mpsc::Sender<Result<astarte_message_hub_proto::AstarteMessage, tonic::Status>>,
@@ -595,7 +624,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_attach() {
+    async fn test_attach_detach() {
         let (server_impl, mut channels) = build_test_message_hub_server();
         let (server_future, client) = mock_grpc_actors(server_impl)
             .await
@@ -603,9 +632,12 @@ mod test {
 
         let client_operations = async move {
             // When the grpc connection gets created the attach methods is called
-            let _connection = mock_astarte_grpc_client(client, &Interfaces::new())
+            let connection = mock_astarte_grpc_client(client, &Interfaces::new())
                 .await
                 .unwrap();
+
+            // manually calling detach
+            connection.disconnect().await.unwrap();
         };
 
         tokio::select! {
@@ -614,7 +646,8 @@ mod test {
         }
 
         expect_messages!(channels.server_request_receiver.try_recv();
-            ServerReceivedRequest::Attach(a) if a.uuid == ID.to_string()
+            ServerReceivedRequest::Attach(a) if a.uuid == ID.to_string(),
+            ServerReceivedRequest::Detach(a) if a.uuid == ID.to_string()
         );
     }
 
@@ -625,23 +658,34 @@ mod test {
             .await
             .expect("Could not construct test client and server");
 
+        const INTERFACE_NAME: &str =
+            "org.astarte-platform.rust.examples.individual-properties.DeviceProperties";
         const STRING_VALUE: &str = "value";
 
         let client_operations = async move {
-            let (device, _rx) = mock_astarte_device_sdk_grpc(
-                client,
-                [Interface::from_str(crate::test::DEVICE_PROPERTIES).unwrap()],
-            )
-            .await;
+            let path = MappingPath::try_from("/1/name").unwrap();
+            let interfaces =
+                Interfaces::from_iter([
+                    Interface::from_str(crate::test::DEVICE_PROPERTIES).unwrap()
+                ]);
+            let mapping_ref = interfaces.interface_mapping(INTERFACE_NAME, &path).unwrap();
 
-            device
-                .send(
-                    "org.astarte-platform.rust.examples.individual-properties.DeviceProperties",
-                    "/1/name",
-                    AstarteType::String(STRING_VALUE.to_string()),
-                )
+            let connection = mock_astarte_grpc_client(client, &interfaces).await.unwrap();
+
+            let validated_individual = mock_validate_individual(
+                mapping_ref,
+                &path,
+                AstarteType::String(STRING_VALUE.to_string()),
+                None,
+            )
+            .unwrap();
+
+            connection
+                .send_individual(validated_individual)
                 .await
                 .unwrap();
+
+            connection.disconnect().await.unwrap();
         };
 
         // Poll client and server future
@@ -656,7 +700,8 @@ mod test {
             => data_event = AstarteDeviceDataEvent::try_from(m).expect("Malformed message");
                 if data_event.interface == "org.astarte-platform.rust.examples.individual-properties.DeviceProperties"
                 && data_event.path == "/1/name"
-                && matches!(data_event.data, Aggregation::Individual(AstarteType::String(v)) if v == STRING_VALUE)
+                && matches!(data_event.data, Aggregation::Individual(AstarteType::String(v)) if v == STRING_VALUE),
+            ServerReceivedRequest::Detach(d) if d.uuid == ID.to_string()
         );
     }
 
@@ -690,6 +735,7 @@ mod test {
             let interface = Interface::from_str(crate::test::OBJECT_DEVICE_DATASTREAM).unwrap();
             let path = MappingPath::try_from("/1").unwrap();
             let interfaces = Interfaces::from_iter([interface.clone()]);
+
             let connection = mock_astarte_grpc_client(client, &interfaces).await.unwrap();
 
             let validated_object = mock_validate_object(
