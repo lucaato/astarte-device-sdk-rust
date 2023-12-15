@@ -101,7 +101,7 @@ impl Grpc {
         }
     }
 
-    /// Polls a message from the tonic stream and tries reattaching if necessary
+    /// Polls a message from the tonic stream
     ///
     /// An [`Option`] is returned directly from the [`tonic::codec::Streaming::message`] method.
     /// A result of [`Option::None`] signals a disconnectiond and should be handled by the caller
@@ -125,8 +125,9 @@ impl Grpc {
             .map_err(GrpcTransportError::from)
     }
 
+    // Detach is consuming: after detach the connection should be unusable
     async fn try_detach<S>(
-        client: &mut MessageHubClient<tonic::transport::Channel>,
+        mut client: MessageHubClient<tonic::transport::Channel>,
         uuid: S,
     ) -> Result<(), GrpcTransportError>
     where
@@ -142,13 +143,17 @@ impl Grpc {
             .map_err(GrpcTransportError::from)
     }
 
+    // Detach and attach is not consuming since it should replace the stream and leave a working connection
     async fn try_detach_attach(&self, data: NodeData) -> Result<(), GrpcTransportError> {
         // the lock on stream is actually intended since we are detaching and re-attaching
         // we want to make sure no one uses the stream while the client is detached
         let mut stream = self.stream.lock().await;
         let mut client = self.client.lock().await;
 
-        Grpc::try_detach(&mut client, &self.uuid).await?;
+        client
+            .detach(Node::new(self.uuid, &[] as &[Vec<u8>]))
+            .await
+            .map(|_| ())?;
 
         *stream = Grpc::try_attach(&mut client, data).await?;
 
@@ -285,12 +290,12 @@ impl Register for Grpc {
 impl Disconnect for Grpc {
     async fn disconnect(mut self) -> Result<(), crate::Error> {
         if let Some(SharedGrpc {
-            ref mut client,
+            client,
             stream: _stream,
             uuid,
-        }) = Arc::get_mut(&mut self.shared)
+        }) = Arc::into_inner(self.shared)
         {
-            Self::try_detach(client.get_mut(), uuid.to_string())
+            Self::try_detach(client.into_inner(), uuid.to_string())
                 .await
                 .map_err(|e| e.into())
         } else {
@@ -373,8 +378,8 @@ impl NodeData {
 }
 
 #[cfg(test)]
-mod test {
-    use std::{collections::HashMap, future::Future, str::FromStr, sync::Arc};
+pub(crate) mod test {
+    use std::{future::Future, str::FromStr, sync::Arc};
 
     use astarte_message_hub_proto::{
         message_hub_client::MessageHubClient,
@@ -387,7 +392,7 @@ mod test {
         net::{UnixListener, UnixStream},
         sync::{mpsc, Mutex},
     };
-    use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
+    use tokio_stream::wrappers::UnixListenerStream;
     use uuid::{uuid, Uuid};
 
     use crate::{
@@ -398,7 +403,7 @@ mod test {
             Disconnect,
         },
         types::AstarteType,
-        Aggregation, AstarteAggregate, AstarteDeviceDataEvent, Interface,
+        Aggregation, AstarteAggregate, AstarteDeviceDataEvent, EventReceiver, Interface,
     };
 
     use super::super::{test::mock_shared_device, Publish, Receive, ReceivedEvent};
@@ -412,16 +417,16 @@ mod test {
         Detach(Node),
     }
 
-    struct TestMessageHubServer {
+    type ServerSenderValuesVec =
+        Vec<Result<astarte_message_hub_proto::AstarteMessage, tonic::Status>>;
+
+    pub(crate) struct TestMessageHubServer {
         /// This stream can be used to send test events that will be handled by the astarte device sdk code
         /// and by the Grpc client.
-        /// The value is wrapped in an [`Option`] to allow the value to be taken away.
-        /// This means that currently a device can be attached only once.
-        server_send: Mutex<
-            Option<
-                mpsc::Receiver<Result<astarte_message_hub_proto::AstarteMessage, tonic::Status>>,
-            >,
-        >,
+        /// Each received elements is a "session": the [`Vec`] received contains messages that will be sent
+        /// after the client attaches to the server.
+        /// Every successive [`Vec`] is only returned if the client reattaches to the server.
+        server_send: Mutex<mpsc::Receiver<ServerSenderValuesVec>>,
         /// This stream contains requests received by the server
         server_received: mpsc::Sender<ServerReceivedRequest>,
     }
@@ -429,12 +434,12 @@ mod test {
     impl TestMessageHubServer {
         fn new(
             server_send: mpsc::Receiver<
-                Result<astarte_message_hub_proto::AstarteMessage, tonic::Status>,
+                Vec<Result<astarte_message_hub_proto::AstarteMessage, tonic::Status>>,
             >,
             server_received: mpsc::Sender<ServerReceivedRequest>,
         ) -> Self {
             Self {
-                server_send: Mutex::new(Some(server_send)),
+                server_send: Mutex::new(server_send),
                 server_received,
             }
         }
@@ -442,8 +447,10 @@ mod test {
 
     #[async_trait]
     impl MessageHub for TestMessageHubServer {
-        type AttachStream = tokio_stream::wrappers::ReceiverStream<
-            Result<astarte_message_hub_proto::AstarteMessage, tonic::Status>,
+        type AttachStream = futures::stream::Iter<
+            std::vec::IntoIter<
+                std::result::Result<astarte_message_hub_proto::AstarteMessage, tonic::Status>,
+            >,
         >;
 
         async fn attach(
@@ -456,10 +463,11 @@ mod test {
             self.server_received.send(ServerReceivedRequest::Attach(inner)).await
                 .expect("Could not send notification of a server received message, connect a channel to the Receiver");
 
-            let receiver = self.server_send.lock().await
-                .take().expect("No more streams found, you should provide one Receiver to be able to send data to the attach caller");
+            let mut receiver_lock = self.server_send.lock().await;
 
-            Ok(tonic::Response::new(ReceiverStream::new(receiver)))
+            let response_vec = receiver_lock.recv().await.unwrap();
+
+            Ok(tonic::Response::new(futures::stream::iter(response_vec)))
         }
 
         async fn send(
@@ -529,7 +537,7 @@ mod test {
         Ok(MessageHubClient::new(channel))
     }
 
-    async fn mock_grpc_actors(
+    pub(crate) async fn mock_grpc_actors(
         server_impl: TestMessageHubServer,
     ) -> Result<
         (
@@ -551,7 +559,7 @@ mod test {
 
     const ID: Uuid = uuid!("67e55044-10b1-426f-9247-bb680e5fe0c8");
 
-    async fn mock_astarte_grpc_client(
+    pub(crate) async fn mock_astarte_grpc_client(
         mut message_hub_client: MessageHubClient<tonic::transport::Channel>,
         interfaces: &Interfaces,
     ) -> Result<Grpc, Box<dyn std::error::Error>> {
@@ -561,13 +569,14 @@ mod test {
         Ok(Grpc::new(message_hub_client, stream, ID))
     }
 
-    struct TestServerChannels {
+    pub(crate) struct TestServerChannels {
         server_response_sender:
-            mpsc::Sender<Result<astarte_message_hub_proto::AstarteMessage, tonic::Status>>,
+            mpsc::Sender<Vec<Result<astarte_message_hub_proto::AstarteMessage, tonic::Status>>>,
         server_request_receiver: mpsc::Receiver<ServerReceivedRequest>,
     }
 
-    fn build_test_message_hub_server() -> (TestMessageHubServer, TestServerChannels) {
+    // TODO to be replaced by the GrpcTestContext
+    pub(crate) fn build_test_message_hub_server() -> (TestMessageHubServer, TestServerChannels) {
         // Holds the stream of messages that will follow an attach, the server stores the receiver
         // and relays messages to the stream got by the client that called `attach`
         let server_response_channel = mpsc::channel(10);
@@ -630,6 +639,9 @@ mod test {
             .await
             .expect("Could not construct test client and server");
 
+        // no messages are read as responses by the server so we pass an empty vec
+        channels.server_response_sender.send(vec![]).await.unwrap();
+
         let client_operations = async move {
             // When the grpc connection gets created the attach methods is called
             let connection = mock_astarte_grpc_client(client, &Interfaces::new())
@@ -657,6 +669,9 @@ mod test {
         let (server_future, client) = mock_grpc_actors(server_impl)
             .await
             .expect("Could not construct test client and server");
+
+        // no messages are read as responses by the server so we pass an empty vec
+        channels.server_response_sender.send(vec![]).await.unwrap();
 
         const INTERFACE_NAME: &str =
             "org.astarte-platform.rust.examples.individual-properties.DeviceProperties";
@@ -705,22 +720,18 @@ mod test {
         );
     }
 
-    struct MockObject {}
+    fn get_mock_object_message() -> astarte_message_hub_proto::AstarteMessage {
+        let proto_payload: astarte_message_hub_proto::astarte_message::Payload =
+            Aggregation::Object((crate::test::MockObject {}).astarte_aggregate().unwrap())
+                .try_into()
+                .unwrap();
 
-    impl AstarteAggregate for MockObject {
-        fn astarte_aggregate(self) -> Result<HashMap<String, AstarteType>, crate::error::Error> {
-            let mut obj = HashMap::new();
-            obj.insert("endpoint1".to_string(), AstarteType::Double(4.2));
-            obj.insert(
-                "endpoint2".to_string(),
-                AstarteType::String("obj".to_string()),
-            );
-            obj.insert(
-                "endpoint3".to_string(),
-                AstarteType::BooleanArray(vec![true]),
-            );
-
-            Ok(obj)
+        astarte_message_hub_proto::AstarteMessage {
+            interface_name: "org.astarte-platform.rust.examples.object-datastream.DeviceDatastream"
+                .to_string(),
+            path: "/1".to_string(),
+            timestamp: None,
+            payload: Some(proto_payload.clone()),
         }
     }
 
@@ -730,6 +741,9 @@ mod test {
         let (server_future, client) = mock_grpc_actors(server_impl)
             .await
             .expect("Could not construct test client and server");
+
+        // no messages are read as responses by the server so we pass an empty vec
+        channels.server_response_sender.send(vec![]).await.unwrap();
 
         let client_operations = async move {
             let interface = Interface::from_str(crate::test::OBJECT_DEVICE_DATASTREAM).unwrap();
@@ -741,7 +755,7 @@ mod test {
             let validated_object = mock_validate_object(
                 &interface,
                 &path,
-                MockObject {},
+                crate::test::MockObject {},
                 Some(chrono::offset::Utc::now()),
             )
             .unwrap();
@@ -768,29 +782,18 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_receive_object() {
+    async fn test_connection_receive_object() {
         let (server_impl, channels) = build_test_message_hub_server();
         let (server_future, client) = mock_grpc_actors(server_impl)
             .await
             .expect("Could not construct test client and server");
 
-        let expected_object = Aggregation::Object((MockObject {}).astarte_aggregate().unwrap());
-
-        let proto_payload: astarte_message_hub_proto::astarte_message::Payload =
-            expected_object.try_into().unwrap();
-
-        let astarte_message = astarte_message_hub_proto::AstarteMessage {
-            interface_name: "org.astarte-platform.rust.examples.object-datastream.DeviceDatastream"
-                .to_string(),
-            path: "/1".to_string(),
-            timestamp: None,
-            payload: Some(proto_payload.clone()),
-        };
+        let astarte_message = get_mock_object_message();
 
         // Send object from server
         channels
             .server_response_sender
-            .send(Ok(astarte_message))
+            .send(vec![Ok(astarte_message)])
             .await
             .unwrap();
 
@@ -812,13 +815,13 @@ mod test {
 
         let mock_shared_device = mock_shared_device(interfaces, mpsc::channel(1).0); // the channel won't be used
 
-        let astarte_message_hub_proto::astarte_message::Payload::AstarteData(
+        let Some(astarte_message_hub_proto::astarte_message::Payload::AstarteData(
             astarte_message_hub_proto::AstarteDataType {
                 data: Some(expected_data),
             },
-        ) = proto_payload.clone()
+        )) = get_mock_object_message().payload
         else {
-            panic!("Unexpected data format");
+            panic!("Unexpected test value");
         };
 
         expect_messages!(connection.next_event(&mock_shared_device).await;
@@ -833,5 +836,146 @@ mod test {
                 && path == "/1"
                 && data == expected_data
         );
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExecutor for Grpc {
+        type Device = crate::AstarteDeviceSdk<crate::store::memory::MemoryStore, Grpc>;
+        type Context = TestServerChannels;
+
+        async fn run_test_fn<E, F, Fut>(interfaces: Interfaces, func: F)
+        where
+            F: FnOnce(Self::Device, EventReceiver) -> Fut,
+            Fut: Future<Output = Self::Device>,
+            E: crate::test::TestExpect<Self::Context>,
+        {
+            let (server_impl, mut channels) = build_test_message_hub_server();
+            let (server_future, client) = mock_grpc_actors(server_impl)
+                .await
+                .expect("Could not construct test client and server");
+
+            let test_operations = async move {
+                let connection = mock_astarte_grpc_client(client, &interfaces).await.unwrap();
+
+                let (device, tx) = Self::mock_astarte_device_connection(connection, interfaces);
+
+                func(device, tx).await;
+            };
+
+            E::pre_test(&mut channels).await;
+
+            tokio::select! {
+                _ = server_future => panic!("The server closed before the client could complete sending the data"),
+                _ = test_operations => println!("Test performed correctly"),
+            };
+
+            E::post_test(&mut channels).await;
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<TestServerChannels> for crate::test::PropertySetUnset {
+        async fn pre_test(context: &mut TestServerChannels) {
+            // since we are only attaching once and we do not need send any response
+            context.server_response_sender.send(vec![]).await.unwrap();
+        }
+
+        async fn post_test(_context: &mut TestServerChannels) {
+            // expectations are already implemented in the test in lib.rs file
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<TestServerChannels> for crate::test::AddRemoveInterface {
+        async fn pre_test(context: &mut TestServerChannels) {
+            // since we are only reattaching without reading messages we just send an empty vec for every reconnection
+            context.server_response_sender.send(vec![]).await.unwrap();
+
+            context.server_response_sender.send(vec![]).await.unwrap();
+
+            context.server_response_sender.send(vec![]).await.unwrap();
+        }
+
+        async fn post_test(context: &mut TestServerChannels) {
+            expect_messages!(context.server_request_receiver.try_recv();
+                // attach of first connection
+                ServerReceivedRequest::Attach(a) if a.uuid == ID.to_string(),
+                // detach and attach of later after the interface gets added
+                ServerReceivedRequest::Detach(d) if d.uuid == ID.to_string(),
+                ServerReceivedRequest::Attach(a) if a.uuid == ID.to_string(),
+                // detach and attach of later after the interface gets removed
+                ServerReceivedRequest::Detach(d) if d.uuid == ID.to_string(),
+                ServerReceivedRequest::Attach(a) if a.uuid == ID.to_string()
+            )
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<TestServerChannels> for crate::test::UnsetProperty {
+        async fn pre_test(context: &mut TestServerChannels) {
+            context.server_response_sender.send(vec![]).await.unwrap();
+        }
+
+        async fn post_test(context: &mut TestServerChannels) {
+            expect_messages!(context.server_request_receiver.try_recv();
+                ServerReceivedRequest::Attach(a) if a.uuid == ID.to_string(),
+                // first message
+                ServerReceivedRequest::Send(m)
+                => data_event = AstarteDeviceDataEvent::try_from(m).expect("Malformed message");
+                    if data_event.interface == "org.astarte-platform.rust.examples.individual-properties.DeviceProperties"
+                        && data_event.path == "/1/name",
+                => string = { let Aggregation::Individual(AstarteType::String(string)) = data_event.data
+                    else { panic!("Expected an individual message of type string")}; string };
+                    if &string == "name number 1",
+                // unset message
+                ServerReceivedRequest::Send(astarte_message_hub_proto::AstarteMessage {
+                    ref interface_name,
+                    ref path,
+                    timestamp: None,
+                    payload: Some(astarte_message_hub_proto::astarte_message::Payload::AstarteUnset(..)),
+                }) if interface_name == "org.astarte-platform.rust.examples.individual-properties.DeviceProperties"
+                        && path == "/1/name"
+            )
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<TestServerChannels> for crate::test::ReceiveObject {
+        async fn pre_test(context: &mut TestServerChannels) {
+            // Mock object
+            let astarte_message = get_mock_object_message();
+
+            // Send object from server
+            context
+                .server_response_sender
+                .send(vec![Ok(astarte_message)])
+                .await
+                .unwrap();
+        }
+
+        async fn post_test(_context: &mut TestServerChannels) {
+            // no post checks to perform
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<TestServerChannels> for crate::test::SendObject {
+        async fn pre_test(context: &mut TestServerChannels) {
+            context.server_response_sender.send(vec![]).await.unwrap();
+        }
+
+        async fn post_test(context: &mut TestServerChannels) {
+            expect_messages!(context.server_request_receiver.try_recv();
+                ServerReceivedRequest::Attach(a) if a.uuid == ID.to_string(),
+                ServerReceivedRequest::Send(m)
+                => data_event = AstarteDeviceDataEvent::try_from(m).expect("Malformed message");
+                    if data_event.interface == "org.astarte-platform.rust.examples.object-datastream.DeviceDatastream"
+                        && data_event.path == "/1",
+                => object_value = {  let Aggregation::Object(v) = data_event.data else { panic!("Expected object") }; v };
+                    if object_value["endpoint1"] == AstarteType::Double(4.2)
+                        && object_value["endpoint2"] == AstarteType::String("obj".to_string())
+                        && object_value["endpoint3"] == AstarteType::BooleanArray(vec![true])
+            );
+        }
     }
 }

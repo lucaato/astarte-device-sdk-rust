@@ -678,18 +678,20 @@ impl ConnectionConfig for MqttConfig {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use std::{str::FromStr, time::Duration};
+    use std::{future::Future, str::FromStr, time::Duration};
 
+    use async_trait::async_trait;
     use mockall::predicate;
-    use rumqttc::Packet;
+    use rumqttc::{Event, Packet};
     use tokio::sync::mpsc;
 
     use crate::{
         interfaces::Interfaces,
+        properties::tests::PROPERTIES_PAYLOAD,
         store::{PropertyStore, StoredProp},
         transport::test::mock_shared_device,
         types::AstarteType,
-        Interface,
+        EventReceiver, Interface,
     };
 
     use super::{AsyncClient, EventLoop, Mqtt, MqttConfig, MqttEvent, SessionData};
@@ -860,5 +862,244 @@ pub(crate) mod test {
 
         assert!(!debug_string.contains("secret="));
         assert!(debug_string.contains("REDACTED"));
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExecutor for Mqtt {
+        type Device = crate::AstarteDeviceSdk<crate::store::memory::MemoryStore, Mqtt>;
+        type Context = Mqtt;
+
+        async fn run_test_fn<E, F, Fut>(interfaces: Interfaces, func: F)
+        where
+            F: FnOnce(Self::Device, EventReceiver) -> Fut,
+            Fut: Future<Output = Self::Device>,
+            E: crate::test::TestExpect<Self::Context>,
+        {
+            let client = AsyncClient::default();
+            let eventloope = EventLoop::default();
+
+            let (mut device, rx) = Self::mock_astarte_device_connection(
+                mock_mqtt_connection(client, eventloope),
+                interfaces,
+            );
+
+            E::pre_test(&mut device.connection).await;
+
+            let mut device = func(device, rx).await;
+
+            E::post_test(&mut device.connection).await;
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<Mqtt> for crate::test::PropertySetUnset {
+        async fn pre_test(context: &mut Mqtt) {
+            context
+                .client
+                .expect_publish::<String, Vec<u8>>()
+                .returning(|_, _, _, _| Ok(()));
+        }
+
+        async fn post_test(_context: &mut Mqtt) {
+            // no post test check to perform
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<Mqtt> for crate::test::AddRemoveInterface {
+        async fn pre_test(context: &mut Mqtt) {
+            context.client
+                .expect_subscribe::<String>()
+                .once()
+                .with(
+                    predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-datastream.ServerDatastream/#".to_string()),
+                    predicate::always()
+                )
+                .returning(|_, _| { Ok(()) });
+
+            context.client
+                .expect_publish::<String, String>()
+                .with(
+                    predicate::eq("realm/device_id".to_string()),
+                    predicate::always(),
+                    predicate::eq(false),
+                    predicate::eq(
+                        "org.astarte-platform.rust.examples.individual-datastream.ServerDatastream:0:1"
+                            .to_string(),
+                    ),
+                )
+                .returning(|_, _, _, _| Ok(()));
+
+            context
+                .client
+                .expect_publish::<String, String>()
+                .with(
+                    predicate::eq("realm/device_id".to_string()),
+                    predicate::always(),
+                    predicate::eq(false),
+                    predicate::eq(String::new()),
+                )
+                .returning(|_, _, _, _| Ok(()));
+
+            context.client
+                .expect_unsubscribe::<String>()
+                .with(predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-datastream.ServerDatastream/#".to_string()))
+                .returning(|_| Ok(()));
+        }
+
+        async fn post_test(_context: &mut Mqtt) {
+            // no post test check to perform
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<Mqtt> for crate::test::HandleEvent {
+        async fn pre_test(context: &mut Mqtt) {
+            context
+                .client
+                .expect_clone()
+                // number of calls not limited since the clone it's inside a loop
+                .returning(AsyncClient::default);
+
+            context.client
+                .expect_publish::<String, Vec<u8>>()
+                .once()
+                .with(
+                    predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-properties.DeviceProperties/1/name".to_string()),
+                    predicate::always(),
+                    predicate::always(),
+                    predicate::function(|buf: &Vec<u8>| {
+                        let doc= bson::Document::from_reader(buf.as_slice()).unwrap();
+
+                        let value = doc.get("v").unwrap().as_str().unwrap();
+
+                        value == "name number 1"
+                    }),
+                )
+                .returning(|_, _, _, _| Ok(()));
+
+            let data = bson::doc! {
+                "v": true
+            };
+
+            // Purge properties
+            let mut eventloop_lock = context.shared.eventloop.lock().await;
+
+            eventloop_lock.expect_poll().once().returning(|| {
+                Ok(Event::Incoming(rumqttc::Packet::Publish(
+                    rumqttc::Publish::new(
+                        "realm/device_id/control/consumer/properties",
+                        rumqttc::QoS::AtLeastOnce,
+                        PROPERTIES_PAYLOAD,
+                    ),
+                )))
+            });
+
+            // Send properties
+            eventloop_lock.expect_poll().returning(move || {
+                Ok(Event::Incoming(rumqttc::Packet::Publish(
+                    rumqttc::Publish::new(
+                        "realm/device_id/org.astarte-platform.rust.examples.individual-properties.ServerProperties/1/enable",
+                        rumqttc::QoS::AtLeastOnce,
+                        bson::to_vec(&data).unwrap()
+                    ),
+                )))
+            });
+        }
+
+        async fn post_test(_context: &mut Mqtt) {
+            // no post test check to perform
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<Mqtt> for crate::test::UnsetProperty {
+        async fn pre_test(context: &mut Mqtt) {
+            let value = AstarteType::String(String::from("name number 1"));
+            let buf = super::payload::Payload::new(&value).to_vec().unwrap();
+
+            let unset = Vec::new();
+
+            context.client
+                .expect_publish::<String, Vec<u8>>()
+                .once()
+                .with(
+                    predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-properties.DeviceProperties/1/name".to_string()),
+                    predicate::always(),
+                    predicate::always(),
+                    predicate::eq(buf),
+                )
+                .returning(|_, _, _, _| Ok(()));
+
+            context.client
+                .expect_publish::<String, Vec<u8>>()
+                .once()
+                .with(
+                    predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-properties.DeviceProperties/1/name".to_string()),
+                    predicate::always(),
+                    predicate::always(),
+                    predicate::eq(unset)
+                )
+                .returning(|_, _, _, _| Ok(()));
+        }
+
+        async fn post_test(_context: &mut Mqtt) {
+            // no post test check to perform
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<Mqtt> for crate::test::ReceiveObject {
+        async fn pre_test(context: &mut Mqtt) {
+            let data = bson::doc! {
+                "v": {
+                    "endpoint1": 4.2,
+                    "endpoint2": "obj",
+                    "endpoint3": [true],
+                }
+            };
+
+            context
+                .client
+                .expect_clone()
+                // number of calls not limited since the clone it's inside a loop
+                .returning(AsyncClient::default);
+
+            context.shared.eventloop.lock().await
+                .expect_poll()
+                .returning(move || {
+                    Ok(Event::Incoming(rumqttc::Packet::Publish(
+                            rumqttc::Publish::new(
+                                "realm/device_id/org.astarte-platform.rust.examples.object-datastream.DeviceDatastream/1",
+                                rumqttc::QoS::AtLeastOnce,
+                                bson::to_vec(&data).unwrap()
+                            ),
+                        )))
+                    });
+        }
+
+        async fn post_test(_context: &mut Mqtt) {
+            // no post test check to perform
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl crate::test::TestExpect<Mqtt> for crate::test::SendObject {
+        async fn pre_test(context: &mut Mqtt) {
+            context.client
+                .expect_publish::<String, Vec<u8>>()
+                .once()
+                .with(
+                    predicate::eq("realm/device_id/org.astarte-platform.rust.examples.object-datastream.DeviceDatastream/1".to_string()),
+                    predicate::always(),
+                    predicate::always(),
+                    predicate::always()
+                )
+                .returning(|_, _, _, _| Ok(()));
+        }
+
+        async fn post_test(_context: &mut Mqtt) {
+            // no post test check to perform
+        }
     }
 }

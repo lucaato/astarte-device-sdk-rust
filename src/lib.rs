@@ -834,21 +834,21 @@ where
 
 #[cfg(test)]
 mod test {
+    use async_trait::async_trait;
     use base64::Engine;
-    use mockall::predicate;
-    use rumqttc::Event;
     use std::collections::HashMap;
+    use std::future::Future;
     use std::str::FromStr;
     use tokio::sync::mpsc;
 
     use crate::interfaces::Interfaces;
-    use crate::properties::tests::PROPERTIES_PAYLOAD;
     use crate::properties::PropAccess;
     use crate::store::memory::MemoryStore;
     use crate::store::PropertyStore;
-    use crate::transport::mqtt::payload::Payload;
+    use crate::transport::grpc::Grpc;
     use crate::transport::mqtt::test::mock_mqtt_connection;
     use crate::transport::mqtt::Mqtt;
+    use crate::transport::{Publish, Receive, Register};
     use crate::{self as astarte_device_sdk, Client, EventReceiver, Interface};
     use astarte_device_sdk::AstarteAggregate;
     use astarte_device_sdk::{types::AstarteType, Aggregation, AstarteDeviceSdk};
@@ -870,6 +870,28 @@ mod test {
     pub(crate) const E2E_DEVICE_AGGREGATE: &str = include_str!(
         "../e2e-test/interfaces/org.astarte-platform.rust.e2etest.DeviceAggregate.json"
     );
+
+    // Test mock objects
+    pub(crate) struct MockObject {}
+
+    impl AstarteAggregate for MockObject {
+        fn astarte_aggregate(
+            self,
+        ) -> Result<HashMap<String, AstarteType>, astarte_device_sdk::error::Error> {
+            let mut obj = HashMap::new();
+            obj.insert("endpoint1".to_string(), AstarteType::Double(4.2));
+            obj.insert(
+                "endpoint2".to_string(),
+                AstarteType::String("obj".to_string()),
+            );
+            obj.insert(
+                "endpoint3".to_string(),
+                AstarteType::BooleanArray(vec![true]),
+            );
+
+            Ok(obj)
+        }
+    }
 
     pub(crate) fn mock_astarte_device<I>(
         client: AsyncClient,
@@ -1064,23 +1086,59 @@ mod test {
         assert_eq!(expected_res, my_aggregate.astarte_aggregate().unwrap());
     }
 
+    #[async_trait(?Send)]
+    pub(crate) trait TestExecutor {
+        type Device;
+        type Context;
+
+        async fn run_test_fn<E, F, Fut>(interfaces: Interfaces, func: F)
+        where
+            F: FnOnce(Self::Device, EventReceiver) -> Fut,
+            Fut: Future<Output = Self::Device>,
+            E: TestExpect<Self::Context>;
+
+        fn mock_astarte_device_connection<C>(
+            connection: C,
+            interfaces: Interfaces,
+        ) -> (AstarteDeviceSdk<MemoryStore, C>, EventReceiver) {
+            let (tx, rx) = mpsc::channel(50);
+
+            let sdk = AstarteDeviceSdk::new(interfaces, MemoryStore::new(), connection, tx);
+
+            (sdk, rx)
+        }
+    }
+
+    #[async_trait(?Send)]
+    pub(crate) trait TestExpect<C> {
+        async fn pre_test(context: &mut C);
+
+        async fn post_test(context: &mut C);
+    }
+
+    pub(crate) struct PropertySetUnset;
+
     #[tokio::test]
     async fn test_property_set_unset() {
-        let eventloop = EventLoop::default();
+        let interfaces = Interfaces::from_iter([Interface::from_str(DEVICE_PROPERTIES).unwrap()]);
 
-        let mut client = AsyncClient::default();
+        Mqtt::run_test_fn::<PropertySetUnset, _, _>(
+            interfaces.clone(),
+            test_property_set_unset_impl,
+        )
+        .await;
+        Grpc::run_test_fn::<PropertySetUnset, _, _>(interfaces, test_property_set_unset_impl).await;
+    }
 
-        client
-            .expect_publish::<String, Vec<u8>>()
-            .returning(|_, _, _, _| Ok(()));
-
-        let (device, _rx) = mock_astarte_device(
-            client,
-            eventloop,
-            [Interface::from_str(DEVICE_PROPERTIES).unwrap()],
-        );
-
+    async fn test_property_set_unset_impl<C>(
+        device: AstarteDeviceSdk<MemoryStore, C>,
+        _rx: EventReceiver,
+    ) -> AstarteDeviceSdk<MemoryStore, C>
+    where
+        C: Publish + Receive + Register + Clone + Send + Sync + 'static,
+    {
         let expected = AstarteType::String("value".to_string());
+
         device
             .send(
                 "org.astarte-platform.rust.examples.individual-properties.DeviceProperties",
@@ -1118,130 +1176,73 @@ mod test {
             .expect("Property not found");
 
         assert_eq!(AstarteType::Unset, val);
+
+        device
     }
+
+    pub(crate) struct AddRemoveInterface;
 
     #[tokio::test]
     async fn test_add_remove_interface() {
-        let eventloope = EventLoop::default();
+        let interfaces = Interfaces::new();
 
-        let mut client = AsyncClient::default();
+        Mqtt::run_test_fn::<AddRemoveInterface, _, _>(
+            interfaces.clone(),
+            test_add_remove_interface_impl,
+        )
+        .await;
+        Grpc::run_test_fn::<AddRemoveInterface, _, _>(interfaces, test_add_remove_interface_impl)
+            .await;
+    }
 
-        client
-            .expect_subscribe::<String>()
-            .once()
-            .with(
-                predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-datastream.ServerDatastream/#".to_string()),
-                predicate::always()
-            )
-            .returning(|_, _| { Ok(()) });
-
-        client
-            .expect_publish::<String, String>()
-            .with(
-                predicate::eq("realm/device_id".to_string()),
-                predicate::always(),
-                predicate::eq(false),
-                predicate::eq(
-                    "org.astarte-platform.rust.examples.individual-datastream.ServerDatastream:0:1"
-                        .to_string(),
-                ),
-            )
-            .returning(|_, _, _, _| Ok(()));
-
-        client
-            .expect_publish::<String, String>()
-            .with(
-                predicate::eq("realm/device_id".to_string()),
-                predicate::always(),
-                predicate::eq(false),
-                predicate::eq(String::new()),
-            )
-            .returning(|_, _, _, _| Ok(()));
-
-        client
-            .expect_unsubscribe::<String>()
-            .with(predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-datastream.ServerDatastream/#".to_string()))
-            .returning(|_| Ok(()));
-
-        let (astarte, _rx) = mock_astarte_device(client, eventloope, []);
-
-        astarte
+    async fn test_add_remove_interface_impl<C>(
+        device: AstarteDeviceSdk<MemoryStore, C>,
+        _rx: EventReceiver,
+    ) -> AstarteDeviceSdk<MemoryStore, C>
+    where
+        C: Publish + Receive + Register + Clone + Send + Sync + 'static,
+    {
+        device
             .add_interface_from_str(INDIVIDUAL_SERVER_DATASTREAM)
             .await
             .unwrap();
 
-        astarte
+        device
             .remove_interface(
                 "org.astarte-platform.rust.examples.individual-datastream.ServerDatastream",
             )
             .await
             .unwrap();
+
+        device
     }
+
+    pub(crate) struct HandleEvent;
 
     #[tokio::test]
     async fn test_handle_event() {
-        let mut client = AsyncClient::default();
+        let interfaces = Interfaces::from_iter([
+            Interface::from_str(DEVICE_PROPERTIES).unwrap(),
+            Interface::from_str(SERVER_PROPERTIES).unwrap(),
+        ]);
 
-        client
-            .expect_clone()
-            // number of calls not limited since the clone it's inside a loop
-            .returning(AsyncClient::default);
+        Mqtt::run_test_fn::<HandleEvent, _, _>(interfaces.clone(), test_handle_event_impl).await;
+        // grpc implementation does not handle purge properties messages so this test is not applicable
+    }
 
-        client
-            .expect_publish::<String, Vec<u8>>()
-            .once()
-            .with(
-                predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-properties.DeviceProperties/1/name".to_string()),
-                predicate::always(),
-                predicate::always(),
-                predicate::function(|buf: &Vec<u8>| {
-                    let doc= bson::Document::from_reader(buf.as_slice()).unwrap();
-
-                    let value = doc.get("v").unwrap().as_str().unwrap();
-
-                    value == "name number 1"
-                }),
-            )
-            .returning(|_, _, _, _| Ok(()));
-
-        let mut eventloope = EventLoop::default();
-
-        let data = bson::doc! {
-            "v": true
+    async fn test_handle_event_impl<C>(
+        mut device: AstarteDeviceSdk<MemoryStore, C>,
+        mut rx: EventReceiver,
+    ) -> AstarteDeviceSdk<MemoryStore, C>
+    where
+        C: Publish + Receive + Register + Clone + Send + Sync + 'static,
+    {
+        let event = tokio::select! {
+            event = rx.recv() => event.expect("no event received"),
+            _ = device.handle_events() => panic!("Device handle_events closed early"),
         };
 
-        // Purge properties
-        eventloope.expect_poll().once().returning(|| {
-            Ok(Event::Incoming(rumqttc::Packet::Publish(
-                rumqttc::Publish::new(
-                    "realm/device_id/control/consumer/properties",
-                    rumqttc::QoS::AtLeastOnce,
-                    PROPERTIES_PAYLOAD,
-                ),
-            )))
-        });
-
-        // Send properties
-        eventloope.expect_poll().once().returning(move || {
-            Ok(Event::Incoming(rumqttc::Packet::Publish(
-                rumqttc::Publish::new(
-                    "realm/device_id/org.astarte-platform.rust.examples.individual-properties.ServerProperties/1/enable",
-                    rumqttc::QoS::AtLeastOnce,
-                    bson::to_vec(&data).unwrap()
-                ),
-            )))
-        });
-
-        let (mut astarte, mut rx) = mock_astarte_device(
-            client,
-            eventloope,
-            [
-                Interface::from_str(DEVICE_PROPERTIES).unwrap(),
-                Interface::from_str(SERVER_PROPERTIES).unwrap(),
-            ],
-        );
-
-        astarte
+        device
             .send(
                 "org.astarte-platform.rust.examples.individual-properties.DeviceProperties",
                 "/1/name",
@@ -1249,15 +1250,6 @@ mod test {
             )
             .await
             .unwrap();
-
-        let handle_events = tokio::spawn(async move {
-            astarte
-                .handle_events()
-                .await
-                .expect("failed to poll events");
-        });
-
-        let event = rx.recv().await.expect("no event received");
 
         assert!(
             event.is_ok(),
@@ -1274,52 +1266,30 @@ mod test {
                 assert!(val);
             }
             _ => panic!("Wrong data type {:?}", event.data),
-        }
+        };
 
-        handle_events.abort();
-        let _ = handle_events.await;
+        device
     }
+
+    pub(crate) struct UnsetProperty;
 
     #[tokio::test]
     async fn test_unset_property() {
-        let mut client = AsyncClient::default();
+        let interfaces = Interfaces::from_iter([Interface::from_str(DEVICE_PROPERTIES).unwrap()]);
 
-        let value = AstarteType::String(String::from("name number 1"));
-        let buf = Payload::new(&value).to_vec().unwrap();
+        Mqtt::run_test_fn::<UnsetProperty, _, _>(interfaces.clone(), test_unset_property_impl)
+            .await;
+        Grpc::run_test_fn::<UnsetProperty, _, _>(interfaces, test_unset_property_impl).await;
+    }
 
-        let unset = Vec::new();
-
-        client
-            .expect_publish::<String, Vec<u8>>()
-            .once()
-            .with(
-                predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-properties.DeviceProperties/1/name".to_string()),
-                predicate::always(),
-                predicate::always(),
-                predicate::eq(buf),
-            )
-            .returning(|_, _, _, _| Ok(()));
-
-        client
-            .expect_publish::<String, Vec<u8>>()
-            .once()
-            .with(
-                predicate::eq("realm/device_id/org.astarte-platform.rust.examples.individual-properties.DeviceProperties/1/name".to_string()),
-                predicate::always(),
-                predicate::always(),
-                predicate::eq(unset)
-            )
-            .returning(|_, _, _, _| Ok(()));
-
-        let eventloope = EventLoop::default();
-
-        let (astarte, _rx) = mock_astarte_device(
-            client,
-            eventloope,
-            [Interface::from_str(DEVICE_PROPERTIES).unwrap()],
-        );
-
-        astarte
+    async fn test_unset_property_impl<C>(
+        device: AstarteDeviceSdk<MemoryStore, C>,
+        _rx: EventReceiver,
+    ) -> AstarteDeviceSdk<MemoryStore, C>
+    where
+        C: Publish + Receive + Register + Clone + Send + Sync + 'static,
+    {
+        device
             .send(
                 "org.astarte-platform.rust.examples.individual-properties.DeviceProperties",
                 "/1/name",
@@ -1328,59 +1298,40 @@ mod test {
             .await
             .unwrap();
 
-        astarte
+        device
             .unset(
                 "org.astarte-platform.rust.examples.individual-properties.DeviceProperties",
                 "/1/name",
             )
             .await
-            .unwrap()
+            .unwrap();
+
+        device
     }
+
+    pub(crate) struct ReceiveObject;
 
     #[tokio::test]
     async fn test_receive_object() {
-        let mut client = AsyncClient::default();
+        let interfaces =
+            Interfaces::from_iter([Interface::from_str(OBJECT_DEVICE_DATASTREAM).unwrap()]);
 
-        client
-            .expect_clone()
-            // number of calls not limited since the clone it's inside a loop
-            .returning(AsyncClient::default);
+        Mqtt::run_test_fn::<ReceiveObject, _, _>(interfaces.clone(), test_receive_object_impl)
+            .await;
+        Grpc::run_test_fn::<ReceiveObject, _, _>(interfaces, test_receive_object_impl).await;
+    }
 
-        let mut eventloope = EventLoop::default();
-
-        let data = bson::doc! {
-            "v": {
-                "endpoint1": 4.2,
-                "endpoint2": "obj",
-                "endpoint3": [true],
-            }
+    async fn test_receive_object_impl<C>(
+        mut device: AstarteDeviceSdk<MemoryStore, C>,
+        mut rx: EventReceiver,
+    ) -> AstarteDeviceSdk<MemoryStore, C>
+    where
+        C: Publish + Receive + Register + Clone + Send + Sync + 'static,
+    {
+        let event = tokio::select! {
+            _ = device.handle_events() => panic!("Device handle_events closed early"),
+            event = rx.recv() => event.expect("no event received"),
         };
-
-        // Send object
-        eventloope.expect_poll().returning(move || {
-            Ok(Event::Incoming(rumqttc::Packet::Publish(
-                rumqttc::Publish::new(
-                    "realm/device_id/org.astarte-platform.rust.examples.object-datastream.DeviceDatastream/1",
-                    rumqttc::QoS::AtLeastOnce,
-                    bson::to_vec(&data).unwrap()
-                ),
-            )))
-        });
-
-        let (mut astarte, mut rx) = mock_astarte_device(
-            client,
-            eventloope,
-            [Interface::from_str(OBJECT_DEVICE_DATASTREAM).unwrap()],
-        );
-
-        let handle_events = tokio::spawn(async move {
-            astarte
-                .handle_events()
-                .await
-                .expect("failed to poll events");
-        });
-
-        let event = rx.recv().await.expect("no event received");
 
         assert!(
             event.is_ok(),
@@ -1409,59 +1360,29 @@ mod test {
         assert_eq!("/1", event.path);
         assert_eq!(expected, event.data);
 
-        handle_events.abort();
-        let _ = handle_events.await;
+        device
     }
+
+    pub(crate) struct SendObject;
 
     #[tokio::test]
     async fn test_send_object() {
-        struct MockObject {}
+        let interfaces =
+            Interfaces::from_iter([
+                Interface::from_str(crate::test::OBJECT_DEVICE_DATASTREAM).unwrap()
+            ]);
 
-        impl AstarteAggregate for MockObject {
-            fn astarte_aggregate(
-                self,
-            ) -> Result<HashMap<String, AstarteType>, astarte_device_sdk::error::Error>
-            {
-                let mut obj = HashMap::new();
-                obj.insert("endpoint1".to_string(), AstarteType::Double(4.2));
-                obj.insert(
-                    "endpoint2".to_string(),
-                    AstarteType::String("obj".to_string()),
-                );
-                obj.insert(
-                    "endpoint3".to_string(),
-                    AstarteType::BooleanArray(vec![true]),
-                );
+        Mqtt::run_test_fn::<SendObject, _, _>(interfaces.clone(), test_send_object_impl).await;
+        Grpc::run_test_fn::<SendObject, _, _>(interfaces, test_send_object_impl).await;
+    }
 
-                Ok(obj)
-            }
-        }
-
-        let mut client = AsyncClient::default();
-        let eventloope = EventLoop::default();
-
-        client
-            .expect_clone()
-            // number of calls not limited since the clone it's inside a loop
-            .returning(AsyncClient::default);
-
-        client
-            .expect_publish::<String, Vec<u8>>()
-            .once()
-            .with(
-                predicate::eq("realm/device_id/org.astarte-platform.rust.examples.object-datastream.DeviceDatastream/1".to_string()),
-                predicate::always(),
-                predicate::always(),
-                predicate::always()
-            )
-            .returning(|_, _, _, _| Ok(()));
-
-        let (device, _rx) = mock_astarte_device(
-            client,
-            eventloope,
-            [Interface::from_str(OBJECT_DEVICE_DATASTREAM).unwrap()],
-        );
-
+    async fn test_send_object_impl<C>(
+        device: AstarteDeviceSdk<MemoryStore, C>,
+        _rx: EventReceiver,
+    ) -> AstarteDeviceSdk<MemoryStore, C>
+    where
+        C: Publish + Receive + Register + Clone + Send + Sync + 'static,
+    {
         device
             .send_object_with_timestamp(
                 "org.astarte-platform.rust.examples.object-datastream.DeviceDatastream",
@@ -1471,5 +1392,7 @@ mod test {
             )
             .await
             .unwrap();
+
+        device
     }
 }

@@ -82,7 +82,7 @@ env_logger = { workspace = true }
 mockall = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
-tokio-stream = { workspace = true, features = ["net"] }
+tokio-stream = { workspace = true, features = ["net", "sync"] }
 tower = { workspace = true }
 
 [features]
