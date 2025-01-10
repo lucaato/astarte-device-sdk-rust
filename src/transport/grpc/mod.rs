@@ -894,6 +894,637 @@ where
 }
 
 #[cfg(test)]
+mod refactored_tests {
+    use std::{mem::swap, net::SocketAddr, sync::Arc};
+
+    use astarte_message_hub_proto::{
+        message_hub_client, message_hub_server, pbjson_types, tonic, AstarteMessage,
+        InterfacesJson, InterfacesName, MessageHubEvent, Node, Property, PropertyIdentifier,
+        StoredProperties, StoredPropertiesFilter,
+    };
+    use futures::Future;
+    use tokio::{net::TcpListener, sync::Mutex};
+    use uuid::Uuid;
+
+    use crate::{
+        builder::DEFAULT_VOLATILE_CAPACITY,
+        interfaces::Interfaces,
+        retention::memory::SharedVolatileStore,
+        store::{wrapper::StoreWrapper, PropertyStore},
+    };
+
+    use super::{Grpc, GrpcClient, MsgHubClient, NodeData, NodeIdInterceptor};
+
+    macro_rules! impl_grpc_call_utils {
+        (impl $impl_block:ident; $($into_fn:ident, $is_fn:ident => $name:ident($inner_type:ty)),+) => {
+            impl $impl_block {
+            $(
+                fn $into_fn(self) -> Result<$inner_type, Self> {
+                    match self {
+                        Self::$name(i) => Ok(i),
+                        _ => Err(self),
+                    }
+                }
+            )*
+            $(
+                fn $is_fn(&self) -> bool {
+                    matches!(self, Self::$name(..))
+                }
+            )*
+            }
+        };
+    }
+
+    #[derive(Clone, Debug)]
+    enum ServerRequest {
+        Attach((Uuid, Node)),
+        Send(AstarteMessage),
+        Detach(Uuid),
+        AddInterfaces(InterfacesJson),
+        RemoveInterfaces(InterfacesName),
+        GetProperties(InterfacesName),
+        GetAllProperties(StoredPropertiesFilter),
+        GetProperty(PropertyIdentifier),
+    }
+
+    impl_grpc_call_utils!(impl ServerRequest;
+        try_into_attach, is_attach => Attach((Uuid, Node)),
+        try_into_send, is_send => Send(AstarteMessage),
+        try_into_detach, is_detach => Detach(Uuid),
+        try_into_add_interfaces, is_add_interfaces => AddInterfaces(InterfacesJson),
+        try_into_remove_interfaces, is_remove_interfaces => RemoveInterfaces(InterfacesName),
+        try_into_get_properties, is_get_properties => GetProperties(InterfacesName),
+        try_into_get_all_properties, is_get_all_properties => GetAllProperties(StoredPropertiesFilter),
+        try_into_get_property, is_get_property => GetProperty(PropertyIdentifier)
+    );
+
+    type GrpcResult<T> = Result<T, tonic::Status>;
+
+    #[derive(Clone, Debug)]
+    enum ServerResponse {
+        Attach(Vec<GrpcResult<MessageHubEvent>>),
+        Send(GrpcResult<()>),
+        Detach(GrpcResult<()>),
+        AddInterfaces(GrpcResult<()>),
+        RemoveInterfaces(GrpcResult<()>),
+        GetProperties(GrpcResult<StoredProperties>),
+        GetAllProperties(GrpcResult<StoredProperties>),
+        GetProperty(GrpcResult<Property>),
+    }
+
+    impl_grpc_call_utils!(impl ServerResponse;
+        try_into_attach, is_attach => Attach(Vec<GrpcResult<MessageHubEvent>>),
+        try_into_send, is_send => Send(GrpcResult<()>),
+        try_into_detach, is_detach => Detach(GrpcResult<()>),
+        try_into_add_interfaces, is_add_interfaces => AddInterfaces(GrpcResult<()>),
+        try_into_remove_interfaces, is_remove_interfaces => RemoveInterfaces(GrpcResult<()>),
+        try_into_get_properties, is_get_properties => GetProperties(GrpcResult<StoredProperties>),
+        try_into_get_all_properties, is_get_all_properties => GetAllProperties(GrpcResult<StoredProperties>),
+        try_into_get_property, is_get_property => GetProperty(GrpcResult<Property>)
+    );
+
+    #[derive(Clone)]
+    struct GrpcCallData {
+        received: Vec<ServerRequest>,
+        responses: Vec<ServerResponse>,
+    }
+
+    #[derive(Clone)]
+    struct GrpcServerTest {
+        calls: Arc<Mutex<GrpcCallData>>,
+        client_node_id: Uuid,
+    }
+
+    impl GrpcServerTest {
+        fn new(client_node_id: Uuid) -> Self {
+            let calls = Mutex::new(GrpcCallData {
+                received: vec![],
+                responses: vec![],
+            });
+
+            Self {
+                calls,
+                client_node_id,
+            }
+        }
+
+        fn get_node_id_from_metadata<T>(
+            request: &tonic::Request<T>,
+        ) -> Result<Uuid, tonic::Status> {
+            // check only node-id-bin since the Node does not insert node-id metadata in the request
+            let Some(metadata_val) = request.metadata().get_bin("node-id-bin") else {
+                return Err(tonic::Status::new(
+                    tonic::Code::InvalidArgument,
+                    "absent node id into metadata".to_string(),
+                ));
+            };
+
+            let node_id_bytes = metadata_val
+                .to_bytes()
+                .map_err(|e| tonic::Status::new(tonic::Code::InvalidArgument, e.to_string()))?;
+
+            Uuid::from_slice(&node_id_bytes)
+                .map_err(|e| tonic::Status::new(tonic::Code::InvalidArgument, e.to_string()))
+        }
+
+        fn next_matching_response<M, T>(
+            responses: &mut Vec<ServerResponse>,
+            mut try_into_fn: M,
+        ) -> Option<T>
+        where
+            M: FnMut(ServerResponse) -> Result<T, ServerResponse>,
+        {
+            let mut swapped = Vec::with_capacity(responses.len());
+            swap(responses, &mut swapped);
+            let mut response = None;
+
+            for resp in swapped.into_iter() {
+                match try_into_fn(resp) {
+                    Ok(inner) => {
+                        response = Some(inner);
+                        break;
+                    }
+                    Err(resp) => {
+                        responses.push(resp);
+                    }
+                }
+            }
+
+            response
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl message_hub_server::MessageHub for GrpcServerTest {
+        type AttachStream =
+            futures::stream::Iter<std::vec::IntoIter<Result<MessageHubEvent, tonic::Status>>>;
+
+        async fn attach(
+            &self,
+            request: tonic::Request<Node>,
+        ) -> Result<tonic::Response<Self::AttachStream>, tonic::Status> {
+            // retrieve the node id from the metadata request
+            let node_id = Self::get_node_id_from_metadata(&request)?;
+
+            let inner = request.into_inner();
+            println!("Client '{node_id}' attached");
+
+            let response = {
+                let mut calls = self.calls.lock().await;
+
+                calls.received.push(ServerRequest::Attach((node_id, inner)));
+
+                Self::next_matching_response(&mut calls.responses, ServerResponse::try_into_attach)
+                    .expect("Unexpected call to attach")
+            };
+
+            Ok(tonic::Response::new(futures::stream::iter(response)))
+        }
+
+        async fn send(
+            &self,
+            request: tonic::Request<AstarteMessage>,
+        ) -> Result<tonic::Response<pbjson_types::Empty>, tonic::Status> {
+            let mut calls = self.calls.lock().await;
+
+            calls
+                .received
+                .push(ServerRequest::Send(request.into_inner()));
+
+            Self::next_matching_response(&mut calls.responses, ServerResponse::try_into_send)
+                .expect("Unexpected call to send");
+
+            Ok(tonic::Response::new(pbjson_types::Empty::default()))
+        }
+
+        async fn detach(
+            &self,
+            request: tonic::Request<pbjson_types::Empty>,
+        ) -> Result<tonic::Response<pbjson_types::Empty>, tonic::Status> {
+            let node_id = Self::get_node_id_from_metadata(&request)?;
+            println!("Client detached {}", node_id);
+
+            let mut calls = self.calls.lock().await;
+
+            calls.received.push(ServerRequest::Detach(node_id));
+
+            Self::next_matching_response(&mut calls.responses, ServerResponse::try_into_detach)
+                .expect("Unexpected call to detach");
+
+            Ok(tonic::Response::new(pbjson_types::Empty::default()))
+        }
+
+        async fn add_interfaces(
+            &self,
+            request: tonic::Request<InterfacesJson>,
+        ) -> Result<tonic::Response<pbjson_types::Empty>, tonic::Status> {
+            let mut calls = self.calls.lock().await;
+
+            calls
+                .received
+                .push(ServerRequest::AddInterfaces(request.into_inner()));
+
+            Self::next_matching_response(
+                &mut calls.responses,
+                ServerResponse::try_into_add_interfaces,
+            )
+            .expect("Unexpected call to add_interfaces");
+
+            Ok(tonic::Response::new(pbjson_types::Empty::default()))
+        }
+
+        async fn remove_interfaces(
+            &self,
+            request: tonic::Request<InterfacesName>,
+        ) -> Result<tonic::Response<pbjson_types::Empty>, tonic::Status> {
+            let mut calls = self.calls.lock().await;
+
+            calls
+                .received
+                .push(ServerRequest::RemoveInterfaces(request.into_inner()));
+
+            Self::next_matching_response(
+                &mut calls.responses,
+                ServerResponse::try_into_remove_interfaces,
+            )
+            .expect("Unexpected call to remove_interfaces");
+
+            Ok(tonic::Response::new(pbjson_types::Empty::default()))
+        }
+
+        async fn get_properties(
+            &self,
+            request: tonic::Request<InterfacesName>,
+        ) -> Result<tonic::Response<StoredProperties>, tonic::Status> {
+            let mut calls = self.calls.lock().await;
+
+            calls
+                .received
+                .push(ServerRequest::GetProperties(request.into_inner()));
+
+            let response = Self::next_matching_response(
+                &mut calls.responses,
+                ServerResponse::try_into_get_properties,
+            )
+            .expect("Unexpected call to get_properties");
+
+            response.map(|e| tonic::Response::new(e))
+        }
+
+        async fn get_all_properties(
+            &self,
+            request: tonic::Request<StoredPropertiesFilter>,
+        ) -> Result<tonic::Response<StoredProperties>, tonic::Status> {
+            let mut calls = self.calls.lock().await;
+
+            calls
+                .received
+                .push(ServerRequest::GetAllProperties(request.into_inner()));
+
+            let response = Self::next_matching_response(
+                &mut calls.responses,
+                ServerResponse::try_into_get_all_properties,
+            )
+            .expect("Unexpected call to get_all_properties");
+
+            response.map(|e| tonic::Response::new(e))
+        }
+
+        async fn get_property(
+            &self,
+            request: tonic::Request<PropertyIdentifier>,
+        ) -> Result<tonic::Response<Property>, tonic::Status> {
+            let mut calls = self.calls.lock().await;
+
+            calls
+                .received
+                .push(ServerRequest::GetProperty(request.into_inner()));
+
+            let response = Self::next_matching_response(
+                &mut calls.responses,
+                ServerResponse::try_into_get_property,
+            )
+            .expect("Unexpected call to get_all_properties");
+
+            response.map(|e| tonic::Response::new(e))
+        }
+    }
+
+    struct GrpcServerRunner<FS, FC> {
+        server_impl: GrpcServerTest,
+        client_fut: FC,
+        server_fut: FS,
+        node_data: NodeData,
+    }
+
+    impl<FS, FC> GrpcServerRunner<FS, FC>
+    where
+        FS: Future<Output = ()>,
+        FC: Future<Output = MsgHubClient>,
+    {
+        pub async fn new<S>(
+            server_impl: GrpcServerTest,
+            interfaces: &Interfaces,
+        ) -> Result<
+            GrpcServerRunner<impl Future<Output = ()>, impl Future<Output = MsgHubClient>>,
+            Box<dyn std::error::Error>,
+        > {
+            let (server_fut, client_fut) = Self::mock_grpc_actors(server_impl.clone()).await?;
+            let node_data = NodeData::try_from(interfaces)?;
+
+            Ok(GrpcServerRunner {
+                node_data,
+                server_fut,
+                client_fut,
+                server_impl,
+            })
+        }
+
+        pub async fn run<S>(self, store: S) -> Result<GrpcServerRunning, Box<dyn std::error::Error>>
+        where
+            FS: Future<Output = ()>,
+            FC: Future<Output = MsgHubClient>,
+            S: PropertyStore,
+        {
+            let Self {
+                node_data,
+                server_impl,
+                client_fut,
+                server_fut,
+            } = self;
+
+            let client_operations = async move {
+                let message_hub_client = client_fut.await;
+
+                let (mut client, mut connection) =
+                    Self::mock_astarte_grpc_client(message_hub_client, node_data, store)
+                        .await
+                        .expect("Could not construct grpc client");
+            };
+
+            // loop to keep executing the server
+            tokio::select! {
+                _ = server_fut => return Err(Box::new("The server closed before the client could complete sending the data".into())),
+                _ = client_operations => println!("Client sent its data"),
+            }
+        }
+
+        async fn mock_grpc_actors(
+            server_impl: GrpcServerTest,
+        ) -> Result<
+            (impl Future<Output = ()>, impl Future<Output = MsgHubClient>),
+            Box<dyn std::error::Error>,
+        > {
+            // bind to port 0 to make the kernel choose an open port
+            let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let addr = socket.local_addr()?;
+
+            let interceptor = NodeIdInterceptor::new(server_impl.client_node_id);
+            let server = Self::make_server(socket, server_impl)?;
+            let client = Self::make_client(addr, interceptor).await;
+
+            Ok((server, client))
+        }
+
+        async fn mock_astarte_grpc_client<S>(
+            mut message_hub_client: MsgHubClient,
+            node_data: NodeData,
+            store: S,
+        ) -> Result<(GrpcClient<S>, Grpc<S>), Box<dyn std::error::Error>>
+        where
+            S: PropertyStore,
+        {
+            let stream = Grpc::<S>::attach(&mut message_hub_client, node_data).await?;
+
+            let client = GrpcClient::new(
+                message_hub_client.clone(),
+                StoreWrapper::new(store),
+                SharedVolatileStore::with_capacity(DEFAULT_VOLATILE_CAPACITY),
+            );
+            let grcp = Grpc::new(ID, message_hub_client, stream);
+
+            Ok((client, grcp))
+        }
+
+        fn make_server(
+            sock: TcpListener,
+            server: GrpcServerTest,
+        ) -> Result<impl Future<Output = ()>, Box<dyn std::error::Error>> {
+            Ok(async move {
+                tonic::transport::Server::builder()
+                    .add_service(message_hub_server::MessageHubServer::new(server))
+                    .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(sock))
+                    .await
+                    .unwrap();
+            })
+        }
+
+        async fn make_client(
+            addr: SocketAddr,
+            interceptor: NodeIdInterceptor,
+        ) -> impl Future<Output = MsgHubClient> {
+            async move {
+                let channel = loop {
+                    let channel_res =
+                        tonic::transport::Endpoint::try_from(format!("http://{}", addr))
+                            .unwrap()
+                            .connect()
+                            .await;
+
+                    match channel_res {
+                        Ok(channel) => break channel,
+                        Err(err) => println!("Failed attempt of connecting with error: {}", err),
+                    }
+                };
+
+                message_hub_client::MessageHubClient::with_interceptor(channel, interceptor)
+            }
+        }
+    }
+
+    struct GrpcServerRunning {}
+
+    #[tokio::test]
+    async fn test_server_error() {
+        let (server_impl, mut channels) = build_test_message_hub_server();
+        let (server_future, client_future) = mock_grpc_actors(server_impl)
+            .await
+            .expect("Could not construct test client and server");
+
+        tokio::select! {
+            _ = server_future => panic!("The server closed before the client could complete sending the data"),
+            _ = client_operations => println!("Client sent its data"),
+        }
+
+        let err = tonic::Status::unknown("Test unknown reattach");
+        println!("{:?} eq {}", err, err.code() == tonic::Code::Unknown);
+
+        // send first error which causes a reattach
+        channels
+            .server_response_sender
+            .send(vec![Err(tonic::Status::unknown("Test unknown reattach"))])
+            .await
+            .unwrap();
+
+        // send second error which causes a reattach
+        channels
+            .server_response_sender
+            .send(vec![Err(tonic::Status::unavailable(
+                "Test unavailable reattach",
+            ))])
+            .await
+            .unwrap();
+
+        // no reattach
+        channels
+            .server_response_sender
+            .send(vec![Err(tonic::Status::not_found("Test no reattach"))])
+            .await
+            .unwrap();
+
+        let client_operations = async move {
+            let client = client_future.await;
+            // When the grpc connection gets created the attach methods is called
+            let (mut client, mut connection) =
+                mock_astarte_grpc_client(client, &Interfaces::new(), MemoryStore::new())
+                    .await
+                    .unwrap();
+
+            // poll the three messages the first two received errors will simply reconnect without returning
+            assert!(matches!(connection.next_event().await, Ok(None)));
+
+            // to reconnect but errors
+            assert!(matches!(
+                connection.reconnect(&Interfaces::new()).await,
+                Ok(())
+            ));
+
+            // second error
+            assert!(matches!(connection.next_event().await, Ok(None)));
+
+            assert!(matches!(
+                connection.reconnect(&Interfaces::new()).await,
+                Ok(())
+            ));
+
+            // third error
+            assert!(matches!(connection.next_event().await, Ok(None)));
+
+            // manually calling detach
+            client.disconnect().await.unwrap();
+        };
+
+        tokio::select! {
+            _ = server_future => panic!("The server closed before the client could complete sending the data"),
+            _ = client_operations => println!("Client sent its data"),
+        }
+
+        expect_messages!(channels.server_request_receiver.try_recv();
+            // connection creation attach
+            ServerReceivedRequest::Attach((id, _)) if id == ID,
+            // first error attach
+            ServerReceivedRequest::Attach((id, _)) if id == ID,
+            // second error attach
+            ServerReceivedRequest::Attach((id, _)) if id == ID,
+            ServerReceivedRequest::Detach(_),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_remove_interface() {
+        let (server_impl, mut channels) = build_test_message_hub_server();
+        let (server_future, client_future) = mock_grpc_actors(server_impl)
+            .await
+            .expect("Could not construct test client and server");
+
+        channels.server_response_sender.send(vec![]).await.unwrap();
+
+        let client_operations = async move {
+            let client = client_future.await;
+            // When the grpc connection gets created the attach methods is called
+            let (mut client, _connection) =
+                mock_astarte_grpc_client(client, &Interfaces::new(), MemoryStore::new())
+                    .await
+                    .unwrap();
+
+            let interfaces = Interfaces::new();
+
+            let interface = Interface::from_str(crate::test::DEVICE_PROPERTIES).unwrap();
+            let validated = interfaces.validate(interface.clone()).unwrap().unwrap();
+
+            client.add_interface(&interfaces, &validated).await.unwrap();
+
+            client
+                .remove_interface(&interfaces, &validated)
+                .await
+                .unwrap();
+
+            let additional_interface =
+                Interface::from_str(crate::test::E2E_DEVICE_PROPERTY).unwrap();
+            let to_add = Interfaces::new()
+                .validate_many([interface.clone(), additional_interface.clone()])
+                .unwrap();
+
+            client
+                .extend_interfaces(&interfaces, &to_add)
+                .await
+                .unwrap();
+
+            let to_remove = HashMap::from([
+                (interface.interface_name(), &interface),
+                (additional_interface.interface_name(), &additional_interface),
+            ]);
+
+            client
+                .remove_interfaces(&interfaces, &to_remove)
+                .await
+                .unwrap();
+
+            // manually calling detach
+            client.disconnect().await.unwrap();
+        };
+
+        tokio::select! {
+            _ = server_future => panic!("The server closed before the client could complete sending the data"),
+            _ = client_operations => println!("Client sent its data"),
+        }
+
+        let interface = Interface::from_str(crate::test::DEVICE_PROPERTIES).unwrap();
+        let additional_interface = Interface::from_str(crate::test::E2E_DEVICE_PROPERTY).unwrap();
+
+        let mut expect_added = [&additional_interface, &interface]
+            .map(|i| serde_json::to_string(i).unwrap())
+            .to_vec();
+        expect_added.sort();
+
+        let mut expect_removed = vec![
+            additional_interface.interface_name().to_string(),
+            interface.interface_name().to_string(),
+        ];
+        expect_removed.sort();
+
+        expect_messages!(channels.server_request_receiver.try_recv();
+            // connection creation attach
+            ServerReceivedRequest::Attach((id, _)) if id == ID,
+            // add interface
+            ServerReceivedRequest::AddInterfaces(i) if i.interfaces_json == vec![serde_json::to_string(&interface).unwrap()],
+            // remove interface
+            ServerReceivedRequest::RemoveInterfaces(i) if i.names == vec![interface.interface_name().to_string()],
+            // add more interfaces
+            ServerReceivedRequest::AddInterfaces(mut i)
+            => ordered = {i.interfaces_json.sort(); i.interfaces_json} ;
+                if ordered == expect_added,
+            // remove more interfaces
+            ServerReceivedRequest::RemoveInterfaces(mut i)
+            => ordered = {i.names.sort(); i.names} ;
+                if ordered == expect_removed,
+            // detach
+            ServerReceivedRequest::Detach(Empty {}),
+        );
+    }
+}
+
+#[cfg(test)]
 mod test {
     use std::{future::Future, net::SocketAddr, str::FromStr};
 
