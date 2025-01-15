@@ -148,7 +148,7 @@ dependencies = [
  "futures",
  "http 1.1.0",
  "itertools 0.11.0",
- "mockall",
+ "mockall 0.12.1",
  "mockito",
  "openssl",
  "rand_core",
@@ -166,6 +166,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
+ "tonic-mock",
  "tracing",
  "url",
  "uuid",
@@ -186,15 +187,17 @@ version = "0.9.2"
 dependencies = [
  "astarte-device-sdk",
  "chrono",
- "mockall",
+ "mockall 0.12.1",
 ]
 
 [[package]]
 name = "astarte-message-hub-proto"
 version = "0.7.0"
-source = "git+https://github.com/lucaato/astarte-message-hub-proto.git?rev=c7d3fb3ec462a938085d8ee1ba0a15bb9fb812c7#c7d3fb3ec462a938085d8ee1ba0a15bb9fb812c7"
+source = "git+https://github.com/lucaato/astarte-message-hub-proto.git?rev=8a887919038c106f6c9a65eeada5453f52fd9f96#8a887919038c106f6c9a65eeada5453f52fd9f96"
 dependencies = [
  "chrono",
+ "futures",
+ "mockall 0.13.1",
  "pbjson-types",
  "prost",
  "serde",
@@ -1431,7 +1434,21 @@ dependencies = [
  "downcast",
  "fragile",
  "lazy_static",
- "mockall_derive",
+ "mockall_derive 0.12.1",
+ "predicates",
+ "predicates-tree",
+]
+
+[[package]]
+name = "mockall"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39a6bfcc6c8c7eed5ee98b9c3e33adc726054389233e201c95dab2d41a3839d2"
+dependencies = [
+ "cfg-if",
+ "downcast",
+ "fragile",
+ "mockall_derive 0.13.1",
  "predicates",
  "predicates-tree",
 ]
@@ -1441,6 +1458,18 @@ name = "mockall_derive"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af7cbce79ec385a1d4f54baa90a76401eb15d9cab93685f62e7e9f942aa00ae2"
+dependencies = [
+ "cfg-if",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "mockall_derive"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ca3004c2efe9011bd4e461bd8256445052b9615405b4f7ea43fc8ca5c20898"
 dependencies = [
  "cfg-if",
  "proc-macro2",
@@ -2688,6 +2717,20 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "tonic-mock"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ea9163cf065e21bf30e5ad1789bf334f5ae67e4a25f0e8200a7e375466e755ea"
+dependencies = [
+ "bytes",
+ "futures",
+ "http 0.2.12",
+ "http-body 0.4.6",
+ "prost",
+ "tonic",
 ]
 
 [[package]]
