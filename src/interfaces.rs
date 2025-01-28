@@ -18,10 +18,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::ops::Deref;
+use std::{borrow::Borrow, vec};
 
 use itertools::Itertools;
 use tracing::{debug, trace};
@@ -318,6 +318,20 @@ pub(crate) struct Introspection<I> {
 impl<I> Introspection<I> {
     pub(crate) fn new(iter: I) -> Self {
         Self { iter }
+    }
+
+    pub(crate) fn sorted<'a>(self) -> Introspection<vec::IntoIter<I::Item>>
+    where
+        I: Iterator<Item = &'a Interface>,
+    {
+        let iter = self.iter.sorted_unstable_by(|a, b| {
+            a.interface_name()
+                .cmp(b.interface_name())
+                .then(a.version_major().cmp(&b.version_major()))
+                .then(a.version_minor().cmp(&b.version_minor()))
+        });
+
+        Introspection { iter }
     }
 }
 

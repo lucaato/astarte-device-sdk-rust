@@ -20,7 +20,10 @@
 
 use crate::types::AstarteType;
 
-use super::{error::StoreError, OptStoredProp, PropertyStore, StoreCapabilities, StoredProp};
+use super::{
+    error::StoreError, HandshakeStatus, HandshakeStatusStore, OptStoredProp, PropertyStore,
+    StoreCapabilities, StoredProp,
+};
 
 /// Wrapper for a generic [`AstarteDatabase`] to convert the error in [`Error`].
 #[derive(Debug, Clone)]
@@ -31,6 +34,22 @@ pub(crate) struct StoreWrapper<S> {
 impl<S> StoreWrapper<S> {
     pub(crate) fn new(store: S) -> Self {
         Self { store }
+    }
+}
+
+impl<S> HandshakeStatusStore for StoreWrapper<S>
+where
+    S: HandshakeStatusStore,
+{
+    async fn store_status(&self, status: HandshakeStatus) -> Result<(), Self::Err> {
+        self.store
+            .store_status(status)
+            .await
+            .map_err(StoreError::store)
+    }
+
+    async fn get_status(&self) -> Result<Option<HandshakeStatus>, Self::Err> {
+        self.store.get_status().await.map_err(StoreError::store)
     }
 }
 

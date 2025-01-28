@@ -68,7 +68,10 @@ use crate::{
     retention::{
         memory::SharedVolatileStore, PublishInfo, RetentionId, StoredRetention, StoredRetentionExt,
     },
-    store::{error::StoreError, wrapper::StoreWrapper, PropertyStore, StoreCapabilities},
+    store::{
+        error::StoreError, wrapper::StoreWrapper, HandshakeStatusStore, PropertyStore,
+        StoreCapabilities,
+    },
     validate::{ValidatedIndividual, ValidatedObject, ValidatedUnset},
     AstarteType, Error, Interface, Timestamp,
 };
@@ -725,7 +728,7 @@ where
 
 impl<S> Reconnect for Mqtt<S>
 where
-    S: StoreCapabilities + PropertyStore,
+    S: StoreCapabilities + PropertyStore + HandshakeStatusStore,
 {
     async fn reconnect(&mut self, interfaces: &Interfaces) -> Result<(), crate::Error> {
         self.connection
@@ -744,7 +747,9 @@ where
 }
 
 /// Wrapper structs that holds data used when connecting/reconnecting
+#[derive(Clone)]
 pub(crate) struct SessionData {
+    /// sorted list of interfaces to allow simple comparison of introspections
     interfaces: String,
     server_interfaces: Vec<String>,
     device_properties: Vec<OptStoredProp>,
@@ -766,11 +771,12 @@ impl SessionData {
     where
         S: PropertyStore<Err = StoreError>,
     {
+        let introspection = Introspection::new(interfaces.iter()).sorted();
         let device_properties = store.device_props_with_unset().await?;
         let server_interfaces = Self::filter_server_interfaces(interfaces);
 
         Ok(Self {
-            interfaces: interfaces.get_introspection_string(),
+            interfaces: introspection.to_string(),
             server_interfaces,
             device_properties,
         })

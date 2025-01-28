@@ -33,7 +33,7 @@ use url::Url;
 
 use crate::{
     builder::{ConnectionConfig, DeviceBuilder, DeviceTransport, DEFAULT_CHANNEL_SIZE},
-    store::{PropertyStore, StoreCapabilities},
+    store::{HandshakeStatusStore, PropertyStore, StoreCapabilities},
     transport::{
         mqtt::{
             config::transport::TransportProvider, connection::MqttConnection, error::MqttError,
@@ -382,7 +382,7 @@ impl MqttConfig {
 
 impl<S> ConnectionConfig<S> for MqttConfig
 where
-    S: StoreCapabilities + PropertyStore + Send + Sync,
+    S: StoreCapabilities + PropertyStore + HandshakeStatusStore + Send + Sync,
 {
     type Conn = Mqtt<S>;
     type Err = Error;

@@ -30,8 +30,8 @@ use crate::{
 };
 
 use super::{
-    into_stored_type, wrap_sync_call, PropRecord, RecordOwnership, SqliteError, StoredRecord,
-    SQLITE_BUSY_TIMEOUT,
+    into_stored_type, wrap_sync_call, PropRecord, RecordOwnership, SqliteError,
+    StoredHandshakeStatus, StoredIntrospection, StoredRecord, SQLITE_BUSY_TIMEOUT,
 };
 
 #[cfg(feature = "sqlite-trace")]
@@ -170,6 +170,20 @@ impl WriteConnection {
                 .map_err(SqliteError::Prepare)?;
 
             statement.execute([interface]).map_err(SqliteError::Query)?;
+
+            Ok(())
+        })
+    }
+
+    pub(super) fn store_introspection(&self, introspection: &str) -> Result<(), SqliteError> {
+        wrap_sync_call(|| {
+            let mut statement = self
+                .prepare_cached(include_query!("queries/handshake/write/introspection.sql"))
+                .map_err(SqliteError::Prepare)?;
+
+            statement
+                .execute([introspection])
+                .map_err(SqliteError::Query)?;
 
             Ok(())
         })
@@ -375,6 +389,50 @@ impl ReadConnection {
             Ok(v)
         })
     }
+
+    pub(super) fn load_introspection(&self) -> Result<Option<String>, SqliteError> {
+        wrap_sync_call(|| {
+            let mut statement = self
+                .prepare_cached(include_query!("queries/handshake/read/introspection.sql"))
+                .map_err(SqliteError::Prepare)?;
+
+            let result = statement.query_row([], |row| {
+                Ok(StoredIntrospection {
+                    introspection_string: row.get(0)?,
+                })
+            });
+
+            match result {
+                Ok(introspection) => Ok(Some(introspection.introspection_string)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(SqliteError::Query(e)),
+            }
+        })
+    }
+
+    //pub(super) fn load_status_list(&self) -> Result<Vec, SqliteError> {
+    //    wrap_sync_call(|| {
+    //        let mut statement = self
+    //            .prepare_cached(include_query!("queries/handshake/read/status.sql"))
+    //            .map_err(SqliteError::Prepare)?;
+    //        let result = statement
+    //            .query_map([], |row| {
+    //                Ok(StoredHandshakeStatus {
+    //                    step_name: row.get(0)?,
+    //                    introspection_string: row.get(1)?,
+    //                })
+    //            })
+    //            .map_err(SqliteError::Query)?;
+    //        //.filter_map(|e| {
+    //        //    e.map_err(SqliteError::Query)
+    //        //        .and_then(StoredRecord::try_into_prop)
+    //        //        .transpose()
+    //        //})
+    //        //.collect::<Result<Vec<StoredProp>, SqliteError>>()?;
+
+    //        Ok(result)
+    //    })
+    //}
 }
 
 impl Deref for ReadConnection {

@@ -27,6 +27,7 @@ use astarte_device_sdk::{
     transport::mqtt::MqttConfig, Value,
 };
 use tracing::error;
+use tracing_subscriber::{layer::*, util::*};
 
 type DynError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -59,6 +60,12 @@ async fn get_name_for_sensor(
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
     env_logger::init();
+
+    // Start logging to console
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::Layer::default().compact())
+        .init();
 
     // Load configuration
     let file =

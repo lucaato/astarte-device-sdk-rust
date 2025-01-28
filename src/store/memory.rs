@@ -23,7 +23,10 @@ use std::{collections::HashMap, fmt::Display, hash::Hash, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::error;
 
-use super::{OptStoredProp, PropertyStore, StoreCapabilities, StoredProp};
+use super::{
+    HandshakeStatus, HandshakeStatusStore, OptStoredProp, PropertyStore, StoreCapabilities,
+    StoredProp,
+};
 use crate::{interface::Ownership, retention::Missing, types::AstarteType};
 
 /// Error from the memory store.
@@ -48,6 +51,17 @@ impl MemoryStore {
         MemoryStore {
             store: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+}
+
+impl HandshakeStatusStore for MemoryStore {
+    // the memory store will not store the handshake status since upon reboot it would be deleted anyways
+    async fn store_status(&self, _status: HandshakeStatus) -> Result<(), Self::Err> {
+        Ok(())
+    }
+
+    async fn get_status(&self) -> Result<Option<HandshakeStatus>, Self::Err> {
+        Ok(None)
     }
 }
 

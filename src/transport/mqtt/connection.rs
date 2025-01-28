@@ -49,6 +49,7 @@ use std::{
     time::Duration,
 };
 
+use astarte_message_hub_proto::tonic::IntoRequest;
 use rumqttc::{
     mqttbytes, ClientError, ConnectionError, Event, NoticeError, Packet, Publish, QoS, StateError,
     Transport,
@@ -62,7 +63,10 @@ use crate::{
     interfaces::Interfaces,
     properties::{encode_set_properties, PropertiesError},
     retry::ExponentialIter,
-    store::{error::StoreError, wrapper::StoreWrapper, OptStoredProp, PropertyStore},
+    store::{
+        error::StoreError, wrapper::StoreWrapper, HandshakeStatus, HandshakeStatusStore,
+        OptStoredProp, PropertyStore,
+    },
     transport::mqtt::{pairing::ApiClient, payload::Payload, AsyncClientExt},
 };
 
@@ -183,7 +187,7 @@ impl MqttConnection {
         store: &StoreWrapper<S>,
     ) -> Result<Self, StoreError>
     where
-        S: PropertyStore,
+        S: PropertyStore + HandshakeStatusStore,
     {
         let mut mqtt_connection = Self::new(client, eventloop, provider, Connecting);
 
@@ -202,7 +206,7 @@ impl MqttConnection {
         store: &StoreWrapper<S>,
     ) -> Result<(), StoreError>
     where
-        S: PropertyStore,
+        S: PropertyStore + HandshakeStatusStore,
     {
         let mut exp_back = ExponentialIter::default();
 
@@ -294,20 +298,23 @@ impl State {
         store: &StoreWrapper<S>,
     ) -> Result<Option<Publish>, StoreError>
     where
-        S: PropertyStore,
+        S: PropertyStore + HandshakeStatusStore,
     {
         trace!("state {}", self);
+
+        let session_data = SessionData::try_from_props(interfaces, store).await?;
+        let introspection = session_data.interfaces.clone();
 
         let next = match self {
             State::Disconnected(disconnected) => disconnected.reconnect(conn, client_id).await,
             State::Connecting(connecting) => connecting.wait_connack(conn).await,
-            State::Handshake(handshake) => {
-                let session_data = SessionData::try_from_props(interfaces, store).await?;
-
-                handshake.start(conn, client_id, store, session_data)
-            }
+            State::Handshake(handshake) => handshake.start(conn, client_id, store, session_data),
             State::WaitAcks(init) => init.wait_connection(conn).await?,
-            State::Connected(connected) => connected.poll(conn).await,
+            State::Connected(connected) => {
+                Handshake::store_introspection(store, introspection);
+
+                connected.poll(conn).await
+            }
         };
 
         let res = match next {
@@ -461,14 +468,23 @@ impl Handshake {
         session_data: SessionData,
     ) -> Next
     where
-        S: PropertyStore,
+        S: PropertyStore + HandshakeStatusStore,
     {
         let client = conn.client.clone();
 
         let client_id_cl: ClientId = client_id.into();
 
         let store = store.clone();
+
         let handle: JoinHandle<Result<(), InitError>> = tokio::spawn(async move {
+            if self
+                .has_stored_introspection(&store, &session_data.interfaces)
+                .await
+            {
+                trace!("The session is present and we already completed a previous handshake, skipping handshake");
+                return Ok(());
+            }
+
             let client_id = client_id_cl.as_ref();
             Self::subscribe_server_interfaces(&client, client_id, &session_data.server_interfaces)
                 .await?;
@@ -633,6 +649,45 @@ impl Handshake {
         }
 
         Ok(())
+    }
+
+    async fn has_stored_introspection<S>(
+        &self,
+        store: &StoreWrapper<S>,
+        current_introspection: &str,
+    ) -> bool
+    where
+        S: PropertyStore + HandshakeStatusStore,
+    {
+        let stored_handshake_status = self
+            .session_present
+            .then_some(store.get_status().await)
+            .and_then(|res| match res {
+                Ok(status) => Some(status),
+                Err(e) => {
+                    // we ignore the error since it does not disrupt the functionality of the device
+                    warn!(error = %Report::new(&e), "Error while retrieving the handshake status from the store");
+                    None
+                }
+            })
+            .flatten();
+
+        return matches!(stored_handshake_status, Some(HandshakeStatus::IntrospectionSent(stored_introspection))
+                if stored_introspection == current_introspection);
+    }
+
+    async fn store_introspection<S>(
+        store: &StoreWrapper<S>,
+        current_introspection: String,
+    ) -> Result<(), StoreError>
+    where
+        S: PropertyStore + HandshakeStatusStore,
+    {
+        store
+            .store_status(HandshakeStatus::IntrospectionSent(
+                current_introspection.to_string(),
+            ))
+            .await
     }
 }
 

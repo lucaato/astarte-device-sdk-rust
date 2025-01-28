@@ -28,6 +28,11 @@ use astarte_device_sdk::{
 };
 use tokio::task::JoinSet;
 use tracing::error;
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::filter::Directive;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
 
 type DynError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -41,7 +46,16 @@ struct Config {
 
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
-    env_logger::init();
+    // Start logging to console
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(EnvFilter::builder().from_env_lossy())
+        .try_init()?;
+    //tracing_subscriber::fmt()
+    //    .with_max_level(tracing::Level::TRACE)
+    //    .init();
+
+    //env_logger::init();
     let now = SystemTime::now();
 
     // Load configuration

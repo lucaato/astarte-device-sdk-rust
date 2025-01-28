@@ -35,6 +35,24 @@ pub mod memory;
 pub mod sqlite;
 pub mod wrapper;
 
+pub enum HandshakeStatus {
+    IntrospectionSent(String),
+}
+
+/// Store the state of the connection handshake procedure in a store implementation
+///
+/// Useful to avoid resending the introspection and subscribing across restarts.
+pub trait HandshakeStatusStore: PropertyStore {
+    /// Store the introspection string
+    fn store_status(
+        &self,
+        status: HandshakeStatus,
+    ) -> impl Future<Output = Result<(), Self::Err>> + Send;
+    /// Retrieve the introspection string
+    fn get_status(&self)
+        -> impl Future<Output = Result<Option<HandshakeStatus>, Self::Err>> + Send;
+}
+
 /// Inform what capabilities are implemented for a store.
 ///
 /// This is a crutch until specialization is implemented in the std library, while still being

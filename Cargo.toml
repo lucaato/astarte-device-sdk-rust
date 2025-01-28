@@ -88,7 +88,9 @@ mockito = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal"] }
 tokio-stream = { workspace = true, features = ["net"] }
-tracing-subscriber = { workspace = true }
+#tracing-subscriber = { workspace = true }
+# TODO remove, only used to log in the examples
+tracing-subscriber = { workspace = true , features = ["env-filter"]}
 
 [features]
 default = ["interface-strict", "sqlite-trace", "tokio-multi-thread"]

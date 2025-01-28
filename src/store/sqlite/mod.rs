@@ -28,7 +28,10 @@ use rusqlite::{
 use statements::{include_query, ReadConnection, WriteConnection};
 use tracing::{debug, error, trace};
 
-use super::{OptStoredProp, PropertyStore, StoreCapabilities, StoredProp};
+use super::{
+    HandshakeStatus, HandshakeStatusStore, OptStoredProp, PropertyStore, StoreCapabilities,
+    StoredProp,
+};
 use crate::{
     interface::{MappingType, Ownership},
     transport::mqtt::payload::{Payload, PayloadError},
@@ -187,6 +190,17 @@ impl Debug for PropRecord {
         }
         .finish()
     }
+}
+
+#[derive(Debug, Clone)]
+struct StoredIntrospection {
+    introspection_string: String,
+}
+
+#[derive(Debug, Clone)]
+struct StoredHandshakeStatus {
+    step_name: String,
+    introspection_string: String,
 }
 
 /// Result of the load_all_props query
@@ -536,6 +550,24 @@ impl PropertyStore for SqliteStore {
 
     async fn device_props_with_unset(&self) -> Result<Vec<OptStoredProp>, Self::Err> {
         self.with_reader(|reader| reader.props_with_unset(Ownership::Device))
+    }
+}
+
+impl HandshakeStatusStore for SqliteStore {
+    async fn store_status(&self, status: HandshakeStatus) -> Result<(), Self::Err> {
+        match status {
+            HandshakeStatus::IntrospectionSent(i) => {
+                self.writer.lock().await.store_introspection(&i)
+            }
+        }
+    }
+
+    async fn get_status(&self) -> Result<Option<HandshakeStatus>, Self::Err> {
+        self.with_reader(|reader| {
+            let introspection = reader.load_introspection()?;
+
+            Ok(introspection.map(HandshakeStatus::IntrospectionSent))
+        })
     }
 }
 
