@@ -60,6 +60,10 @@ license = "Apache-2.0"
 repository = "https://github.com/astarte-platform/astarte-device-sdk-rust"
 rust-version = "1.78.0"
 
+[lib]
+name = "astarte_device_lib"
+crate-type = ["cdylib"]
+
 [dependencies]
 astarte-device-sdk-derive = { workspace = true, optional = true }
 astarte-message-hub-proto = { workspace = true, optional = true }
@@ -89,6 +93,7 @@ sync_wrapper = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "parking_lot", "macros", "fs"] }
 tracing = { workspace = true }
+pyo3 = { workspace = true, optional = true }
 url = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, features = ["v4", "v5"] }
 webpki-roots = { workspace = true, optional = true }
@@ -125,6 +130,7 @@ message-hub = ["dep:astarte-message-hub-proto"]
 sqlite-trace = ["rusqlite/trace"]
 tokio-multi-thread = ["tokio/rt-multi-thread"]
 webpki = ["dep:webpki-roots"]
+python-bindings = ["dep:pyo3"]
 
 [lints.rust]
 # config used for coverage generation
@@ -160,6 +166,7 @@ openssl = "0.10.46"
 phoenix-chan = "0.4.2"
 pretty_assertions = "1.4.1"
 proc-macro2 = "1.0.83"
+pyo3 = "0.24.0"
 quote = "1.0.35"
 rcgen = { version = "0.13.1", default-features = false }
 reqwest = { version = "0.12.9", default-features = false, features = ["http2", "charset", "json", "rustls-tls-native-roots-no-provider"] }
