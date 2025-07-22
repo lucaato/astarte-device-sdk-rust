@@ -56,7 +56,7 @@ jobs:
   e2e-test:
     uses: ./.github/workflows/e2e-test.yaml
     # doesn't need to wait for the cache since creating the astarte cluster takes longer
-    needs: [reuse, dco]
+    needs: [reuse]
   run-examples:
     uses: ./.github/workflows/run-examples.yaml
     # doesn't need to wait for the cache since creating the astarte cluster takes longer
