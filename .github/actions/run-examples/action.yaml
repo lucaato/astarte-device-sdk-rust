@@ -33,11 +33,13 @@ inputs:
     description: 'Astarte pairing url to register the example devices'
 runs:
   using: "composite"
-  # env:
-  #   SDK_WORKSPACE: ${{ inputs.sdk_path }}
-  #   ASTARTE_REALM: ${{ inputs.astarte_realm }}
-  #   ASTARTE_PAIRING_URL: ${{ inputs.astarte_pairing_url }}
   steps:
+    - name: Set environment variables
+      shell: bash
+      run: |
+        echo "SDK_WORKSPACE=${{ inputs.sdk_path }}" >> $GITHUB_ENV
+        echo "ASTARTE_REALM=${{ inputs.astarte_realm }}" >> $GITHUB_ENV
+        echo "ASTARTE_PAIRING_URL=${{ inputs.astarte_pairing_url }}" >> $GITHUB_ENV
     - name: Install example interfaces
       shell: bash
       run: |
@@ -68,8 +70,15 @@ runs:
       shell: bash
       run: |
         ASTARTE_DEVICE_ID=$(astartectl utils device-id generate-random)
-        echo "ASTARTE_DEVICE_ID=$ASTARTE_DEVICE_ID" >> $GITHUB_ENV
-        echo "ASTARTE_CREDENTIALS_SECRET=$(astartectl pairing agent register --compact-output -- "$ASTARTE_DEVICE_ID")" >> $GITHUB_ENV
+        ASTARTE_CREDENTIAL_SECRET=$(astartectl pairing agent register --compact-output -- "$ASTARTE_DEVICE_ID")
+        tee $SDK_WORKSPACE/examples/retention/configuration.json << END
+        {
+            "realm": "$ASTARTE_REALM",
+            "device_id": "$ASTARTE_DEVICE_ID",
+            "credentials_secret": "$ASTARTE_CREDENTIAL_SECRET",
+            "pairing_url": "$ASTARTE_PAIRING_URL"
+        }
+        END
         # prebuild retention example so that the runtime is not build time
         # FIXME fix the problem with the non unique retention ids and remove the disabled debug assertions
         RUSTFLAGS="-C debug-assertions=off" cargo build --locked --example retention --features="derive"
@@ -78,10 +87,7 @@ runs:
       # use the full command to use the sccache
       run: |
         # FIXME fix the problem with the non unique retention ids and remove the disabled debug assertions
-        RUSTFLAGS="-C debug-assertions=off" cargo run --locked --example retention --features="derive" &
-        pid=$!
-        sleep 10
-        kill -SIGINT $pid
+        RUSTFLAGS="-C debug-assertions=off" cargo run --locked --example retention --features="derive" -- -t 10
     # individual datastream  
     - name: Configure and build individual datastream
       shell: bash
@@ -101,10 +107,7 @@ runs:
       shell: bash
       # use the full command to use the sccache
       run: |
-        cargo run --locked --example individual_datastream &
-        pid=$!
-        sleep 10
-        kill -SIGINT $pid
+        cargo run --locked --example individual_datastream -- -t 10
     # object datastream  
     - name: Configure and build object datastream
       shell: bash
@@ -124,10 +127,7 @@ runs:
       shell: bash
       # use the full command to use the sccache
       run: |
-        cargo run --locked --example object_datastream --features="derive" &
-        pid=$!
-        sleep 10
-        kill -SIGINT $pid
+        cargo run --locked --example object_datastream --features="derive" -- -t 10
     # individual properties  
     - name: Configure and build individual properties
       shell: bash
@@ -147,7 +147,4 @@ runs:
       shell: bash
       # use the full command to use the sccache
       run: |
-        cargo run --locked --example individual_properties &
-        pid=$!
-        sleep 10
-        kill -SIGINT $pid
+        cargo run --locked --example individual_properties -- -t 10

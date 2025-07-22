@@ -72,4 +72,4 @@ jobs:
         with:
           sdk_path: ${{ github.workspace }}
           astarte_realm: ${{ env.E2E_REALM }}
-          astarte_pairing_url: ${{ env.E2E_BASE_DOMAIN }}
+          astarte_pairing_url: https://api.${{ env.E2E_BASE_DOMAIN }}/pairing
