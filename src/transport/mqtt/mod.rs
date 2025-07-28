@@ -213,6 +213,32 @@ impl<S> MqttClient<S> {
 
         Ok(())
     }
+
+    async fn reliability_check(
+        &self,
+        id: RetentionId,
+        reliability: Reliability,
+        notice: Token<AckOfPub>,
+    ) -> Result<(), crate::Error>
+    where
+        S: StoreCapabilities,
+    {
+        match reliability {
+            // Since it's Unreliable we will never know the broker received it
+            Reliability::Unreliable => {
+                self.mark_received(&id).await?;
+            }
+            Reliability::Guaranteed | Reliability::Unique => {
+                self.mark_as_sent(&id).await?;
+
+                self.retention
+                    .send((id, notice))
+                    .map_err(|_| Error::Disconnected)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<S> Publish for MqttClient<S>
@@ -281,19 +307,8 @@ where
             "send stored called for retention discard"
         );
 
-        match validated.reliability {
-            // Since it's Unreliable we will never know the broker received it
-            Reliability::Unreliable => {
-                self.mark_received(&id).await?;
-            }
-            Reliability::Guaranteed | Reliability::Unique => {
-                self.mark_as_sent(&id).await?;
-
-                self.retention
-                    .send((id, notice))
-                    .map_err(|_| Error::Disconnected)?;
-            }
-        }
+        self.reliability_check(id, validated.reliability, notice)
+            .await?;
 
         Ok(())
     }
@@ -315,9 +330,8 @@ where
             )
             .await?;
 
-        self.retention
-            .send((id, notice))
-            .map_err(|_| Error::Disconnected)?;
+        self.reliability_check(id, validated.reliability, notice)
+            .await?;
 
         Ok(())
     }
@@ -340,19 +354,8 @@ where
             self.store.get_retention().is_some(),
             "resend stored called without store that supports retention"
         );
-        match data.reliability {
-            // Since it's Unreliable we will never know the broker received it
-            Reliability::Unreliable => {
-                self.mark_received(&id).await?;
-            }
-            Reliability::Guaranteed | Reliability::Unique => {
-                self.mark_as_sent(&id).await?;
 
-                self.retention
-                    .send((id, notice))
-                    .map_err(|_| Error::Disconnected)?;
-            }
-        }
+        self.reliability_check(id, data.reliability, notice).await?;
 
         Ok(())
     }

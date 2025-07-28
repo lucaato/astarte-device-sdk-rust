@@ -321,7 +321,7 @@ pub trait StoredRetention: Clone + Send + Sync {
         buf: &mut Vec<(Id, PublishInfo<'static>)>,
     ) -> impl Future<Output = Result<usize, RetentionError>> + Send;
 
-    /// Marks all publishes as unset and cleans up expired publishes.
+    /// Marks all publishes as unsent and cleans up expired publishes.
     fn reset_all_publishes(&self) -> impl Future<Output = Result<(), RetentionError>> + Send;
 
     /// Retrieves all the interfaces with data stored in the retention.
