@@ -35,6 +35,7 @@ use tracing::{error, warn};
 use crate::{
     error::{DynError, Report},
     interfaces::Interfaces,
+    store::sqlite::SqliteError,
     validate::{ValidatedIndividual, ValidatedObject},
 };
 
@@ -125,6 +126,9 @@ pub enum RetentionError {
         #[source]
         backtrace: DynError,
     },
+    /// Couldn't acquire the store connection
+    #[error("couldn't acquire store connection")]
+    Connection(#[source] DynError),
 }
 
 impl RetentionError {
@@ -190,6 +194,12 @@ impl RetentionError {
     }
 }
 
+impl From<SqliteError> for RetentionError {
+    fn from(value: SqliteError) -> Self {
+        RetentionError::Connection(value.into())
+    }
+}
+
 /// Publish information to be stored.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PublishInfo<'a> {
@@ -252,6 +262,19 @@ impl<'a> PublishInfo<'a> {
             value,
         )
     }
+
+    /// Returns an owned version of the PublishInfo
+    fn into_owned(self) -> PublishInfo<'static> {
+        PublishInfo {
+            interface: self.interface.into_owned().into(),
+            path: self.path.into_owned().into(),
+            version_major: self.version_major,
+            reliability: self.reliability,
+            expiry: self.expiry,
+            sent: self.sent,
+            value: self.value.into_owned().into(),
+        }
+    }
 }
 
 /// Trait to store application packet for a connection.
@@ -298,7 +321,7 @@ pub trait StoredRetention: Clone + Send + Sync {
         buf: &mut Vec<(Id, PublishInfo<'static>)>,
     ) -> impl Future<Output = Result<usize, RetentionError>> + Send;
 
-    /// Marks all publishes as unset and cleans up expired publishes.
+    /// Marks all publishes as unsent and cleans up expired publishes.
     fn reset_all_publishes(&self) -> impl Future<Output = Result<(), RetentionError>> + Send;
 
     /// Retrieves all the interfaces with data stored in the retention.
