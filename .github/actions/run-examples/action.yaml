@@ -78,8 +78,7 @@ runs:
             "pairing_url": "$ASTARTE_PAIRING_URL"
         }
         END
-        # FIXME fix the problem with the non unique retention ids and remove the disabled debug assertions
-        RUSTFLAGS="-C debug-assertions=off" cargo run --locked --example retention --features="derive" -- -l 10
+        cargo run --locked --example retention --features="derive" -- -l 10
     - name: Configure and run individual datastream
       shell: bash
       run: |
