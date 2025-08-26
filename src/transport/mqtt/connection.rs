@@ -43,7 +43,12 @@
 //!
 //! Incoming messages must be processed as they arrive. If an error occurs during this process, it should be propagated up to the client with appropriate error-handling mechanisms.
 
-use std::{collections::VecDeque, fmt::Display, time::Duration};
+use std::{
+    collections::VecDeque,
+    fmt::Display,
+    sync::{Arc, OnceLock},
+    time::{Duration, SystemTime},
+};
 
 use rumqttc::{
     mqttbytes, ClientError, ConnectionError, Event, Packet, Publish, QoS, StateError, TokenError,
@@ -54,19 +59,23 @@ use tokio::task::{JoinError, JoinHandle};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
+    builder::ConnectionConfig,
     error::Report,
     interfaces::Interfaces,
     properties::{encode_set_properties, PropertiesError},
     retry::ExponentialIter,
     session::StoredSession,
     store::{wrapper::StoreWrapper, OptStoredProp, PropertyStore, StoreCapabilities},
-    transport::mqtt::{pairing::ApiClient, payload::Payload, AsyncClientExt},
+    transport::mqtt::{
+        config::MqttTransportOptions, pairing::ApiClient, payload::Payload, AsyncClientExt,
+    },
 };
 
 use super::{
     client::{AsyncClient, EventLoop},
-    config::transport::TransportProvider,
-    ClientId, PairingError, PayloadError, SessionData,
+    config::{transport::TransportProvider, MqttTransport, PartialConfig},
+    error::MqttError,
+    ClientId, MqttConfig, PairingError, PayloadError, SessionData,
 };
 
 /// Errors while initializing the MQTT connection.
@@ -117,25 +126,42 @@ impl InitError {
 /// MQTT connection to Astarte that can be pulled to receive packets.
 #[derive(Debug)]
 pub(crate) struct MqttConnection {
-    connection: Connection,
+    connection: OnceLock<Connection>,
     /// Queue for the packet published while re/connecting.
     buff: VecDeque<Publish>,
     state: State,
 }
 
 impl MqttConnection {
+    pub(crate) fn without_transport(
+        mqtt_config: MqttConfig,
+        config: PartialConfig,
+        client_sender: Arc<OnceLock<AsyncClient>>,
+    ) -> Self {
+        Self {
+            connection: OnceLock::new(),
+            buff: VecDeque::new(),
+            state: State::NeedsTransport(NeedsTransport {
+                mqtt_config,
+                config,
+                client_sender,
+            }),
+        }
+    }
+
     pub(crate) fn new(
         client: AsyncClient,
         eventloop: EventLoop,
         provider: TransportProvider,
         state: impl Into<State>,
     ) -> Self {
-        let connection = Connection {
+        let connection = OnceLock::new();
+        connection.set(Connection {
             client,
             eventloop: SyncWrapper::new(eventloop),
             provider,
             session_synced: false,
-        };
+        });
 
         Self {
             connection,
@@ -153,6 +179,8 @@ impl MqttConnection {
             return Some(publish);
         }
 
+        let connection = self.connection.get_mut()?;
+
         // Here we only get the connected state so we don't need to pass all the arguments, like the
         // interfaces or the store.
         let State::Connected(connected) = &mut self.state else {
@@ -160,7 +188,7 @@ impl MqttConnection {
         };
 
         loop {
-            match connected.poll(&mut self.connection).await {
+            match connected.poll(connection).await {
                 Next::Same => {}
                 Next::Publish(publish) => return Some(publish),
                 Next::State(next) => {
@@ -185,21 +213,35 @@ impl MqttConnection {
         client_id: ClientId<&str>,
         interfaces: &Interfaces,
         store: &StoreWrapper<S>,
-    ) -> Result<Self, PollError>
+        timeout: Duration,
+    ) -> Result<Self, MqttError>
     where
         S: PropertyStore + StoreCapabilities,
     {
         let session_sync = Self::is_introspection_stored(interfaces, store).await;
         debug!(session_sync = session_sync, "Creating new mqtt connection");
         let mut mqtt_connection = Self::new(client, eventloop, provider, Connecting);
-        mqtt_connection.connection.set_session_synced(session_sync);
+        if let Some(connection) = mqtt_connection.connection.get_mut() {
+            connection.set_session_synced(session_sync);
+        }
 
         let mut exp_back = ExponentialIter::default();
+
+        let start = SystemTime::now();
 
         while !mqtt_connection
             .reconnect(client_id, interfaces, store)
             .await?
         {
+            if SystemTime::now()
+                .duration_since(start)
+                .is_ok_and(|d| d > timeout)
+            {
+                // if the timeout is hit we will have a created transport but a connectiong status
+                info!("Timeout reached exiting connction loop without connection established");
+                break;
+            }
+
             let timeout = exp_back.next();
 
             debug!("waiting {timeout} seconds before retrying");
@@ -242,7 +284,7 @@ impl MqttConnection {
         client_id: ClientId<&str>,
         interfaces: &Interfaces,
         store: &StoreWrapper<S>,
-    ) -> Result<bool, PollError>
+    ) -> Result<bool, MqttError>
     where
         S: PropertyStore + StoreCapabilities,
     {
@@ -253,9 +295,11 @@ impl MqttConnection {
         }
 
         loop {
+            let connection = self.state.ensure_transport(&mut self.connection).await?;
+
             let opt_publish = self
                 .state
-                .poll(&mut self.connection, client_id, interfaces, store)
+                .poll(connection, client_id, interfaces, store)
                 .await?;
 
             if let Some(publish) = opt_publish {
@@ -323,6 +367,9 @@ impl Connection {
 /// when polling. The only data that can be easily changed is the current state into the next one.
 #[derive(Debug)]
 pub(crate) enum State {
+    /// Connection was not available when creating the tranport so the pairing process was not completed
+    /// no broker url is available
+    NeedsTransport(NeedsTransport),
     /// The device is disconnected from Astarte, it will need to recreate the connection.
     Disconnected(Disconnected),
     /// The CONNECT packet has been sent, we need to wait for the ConACK packet.
@@ -340,6 +387,26 @@ pub(crate) enum State {
 }
 
 impl State {
+    async fn ensure_transport<'a>(
+        &mut self,
+        conn: &'a mut OnceLock<Connection>,
+    ) -> Result<&'a mut Connection, MqttError> {
+        let connection = if let State::NeedsTransport(needs_transport) = self {
+            debug_assert!(conn.get().is_none());
+
+            let connection = needs_transport.create_transport(conn).await?;
+
+            *self = State::Connecting(Connecting);
+
+            connection
+        } else {
+            // is safe if we are not in the neeeds transport state
+            conn.get_mut().unwrap()
+        };
+
+        Ok(connection)
+    }
+
     async fn poll<S>(
         &mut self,
         conn: &mut Connection,
@@ -362,6 +429,7 @@ impl State {
             }
             State::WaitAcks(init) => init.wait_connection(conn).await,
             State::Connected(connected) => connected.poll(conn).await,
+            State::NeedsTransport(..) => unreachable!("state matched before"),
         };
 
         let res = match next {
@@ -389,6 +457,7 @@ impl State {
 impl Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = match self {
+            State::NeedsTransport(_) => "NeedsTransport",
             State::Disconnected(_) => "Disconnected",
             State::Connecting(_) => "Connecting",
             State::Handshake(_) => "Handshake",
@@ -397,6 +466,46 @@ impl Display for State {
         };
 
         write!(f, "{state}")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NeedsTransport {
+    mqtt_config: MqttConfig,
+    config: PartialConfig,
+    client_sender: Arc<OnceLock<AsyncClient>>,
+}
+
+impl NeedsTransport {
+    async fn create_transport<'a>(
+        &mut self,
+        conn: &'a mut OnceLock<Connection>,
+    ) -> Result<&'a mut Connection, MqttError> {
+        // NOTE pass timeout from outside this function
+        let MqttTransportOptions {
+            mqtt_opts,
+            net_opts: _net_opts,
+            provider,
+        } = self
+            .mqtt_config
+            .try_create_transport(&self.config, Duration::from_secs(10))
+            .await?;
+
+        let (client, eventloop) = AsyncClient::new(mqtt_opts, self.config.channel_size);
+
+        let connection = Connection {
+            client: client.clone(),
+            eventloop: SyncWrapper::new(eventloop),
+            provider,
+            session_synced: false,
+        };
+
+        // TODO could use the async version since lock could wait if two threads are attempting to write (should not happen anyway)
+        let _ = conn.set(connection);
+        let _ = self.client_sender.set(client);
+
+        // SAFETY after set returns the oncelock is guaranteed to contain a value
+        Ok(conn.get_mut().unwrap())
     }
 }
 
@@ -414,7 +523,13 @@ impl Disconnected {
         conn: &mut Connection,
         client_id: ClientId<&str>,
     ) -> Result<Next, PairingError> {
-        let api = ApiClient::from_transport(&conn.provider, client_id.realm, client_id.device_id)?;
+        let api = ApiClient::from_transport(
+            &conn.provider,
+            client_id.realm,
+            client_id.device_id,
+            // TODO pass timeout from external context
+            Duration::from_secs(10),
+        )?;
 
         let transport = match conn.provider.recreate_transport(&api).await {
             Ok(transport) => transport,

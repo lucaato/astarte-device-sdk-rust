@@ -109,7 +109,7 @@ pub struct NoStore;
 pub struct NoConnect;
 
 /// Struct used to pass the connection configuration to the [`ConnectionConfig`]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BuildConfig<S> {
     pub(crate) channel_size: usize,
     pub(crate) writable_dir: Option<PathBuf>,
@@ -375,6 +375,7 @@ where
             connection,
             sender,
             store,
+            // partial_config,
         } = self.connection_config.connect(config).await?;
 
         // set max retention items in the store
@@ -407,6 +408,7 @@ where
     pub(crate) connection: C,
     pub(crate) sender: C::Sender,
     pub(crate) store: StoreWrapper<C::Store>,
+    // pub(crate) partial_config: PartialConfig,
 }
 
 /// Crate private connection implementation.

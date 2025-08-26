@@ -38,7 +38,7 @@ use std::{
     collections::HashMap,
     fmt::{Debug, Display},
     future::{Future, IntoFuture},
-    sync::Arc,
+    sync::{Arc, OnceLock, RwLock},
 };
 
 use astarte_interfaces::{
@@ -98,21 +98,41 @@ pub const DEFAULT_CONNECTION_TIMEOUT: u64 = 5;
 #[derive(Clone, Debug)]
 pub struct MqttClient<S> {
     client_id: ClientId,
-    client: AsyncClient,
+    client: Arc<OnceLock<AsyncClient>>,
     retention: RetSender,
     store: StoreWrapper<S>,
     state: Arc<SharedState>,
 }
 
 impl<S> MqttClient<S> {
-    /// Create a new client.
-    pub(crate) fn new(
+    /// Creates a new client that is missing the transport
+    pub(crate) fn without_transport(
         client_id: ClientId,
-        client: AsyncClient,
         retention: RetSender,
         store: StoreWrapper<S>,
         state: Arc<SharedState>,
     ) -> Self {
+        Self {
+            client_id,
+            client: Arc::new(OnceLock::new()),
+            retention,
+            store,
+            state,
+        }
+    }
+
+    /// Create a new client.
+    pub(crate) fn new(
+        client_id: ClientId,
+        mqtt_client: AsyncClient,
+        retention: RetSender,
+        store: StoreWrapper<S>,
+        state: Arc<SharedState>,
+    ) -> Self {
+        let client = OnceLock::new();
+        client.set(mqtt_client);
+        let client = Arc::new(client);
+
         Self {
             client_id,
             client,
@@ -739,7 +759,7 @@ where
         self.connection
             .reconnect(self.client_id.as_ref(), interfaces, &self.store)
             .await
-            .map_err(|err| Error::Mqtt(MqttError::Poll(err)))
+            .map_err(|err| Error::Mqtt(err))
     }
 }
 

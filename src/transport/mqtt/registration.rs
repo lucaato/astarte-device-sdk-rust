@@ -19,6 +19,8 @@
  */
 //! Provides static functions for registering a new device to an Astarte Cluster.
 
+use std::time::Duration;
+
 use base64::Engine;
 use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -44,6 +46,7 @@ pub async fn register_device(
     pairing_url: &str,
     realm: &str,
     device_id: &str,
+    timeout: Duration,
 ) -> Result<String, PairingError> {
     let mut url = Url::parse(pairing_url)?;
 
@@ -56,7 +59,7 @@ pub async fn register_device(
 
     let payload = ApiData::new(MqttV1HwId { hw_id: device_id });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(timeout).build()?;
     let response = client
         .post(url)
         .bearer_auth(token)
