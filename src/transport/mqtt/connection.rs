@@ -880,13 +880,14 @@ impl Next {
 
                 Next::state(Connecting)
             }
-            ConnectionError::MqttState(StateError::ConnectionAborted)
-            | ConnectionError::RequestsDone => {
+            ConnectionError::RequestsDone => {
                 info!("MQTT connection closed");
 
                 Next::state(Connecting)
             }
-            ConnectionError::Tls(_) | ConnectionError::ConnectionRefused(_) => {
+            ConnectionError::Tls(_)
+            | ConnectionError::ConnectionRefused(_)
+            | ConnectionError::MqttState(StateError::ConnectionAborted) => {
                 trace!("recreate the connection");
 
                 Next::state(Disconnected)
