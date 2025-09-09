@@ -73,7 +73,7 @@ pub enum MqttError {
     // TODO i'm not sure this is the correct error to use here
     /// The client is currently disconnected
     #[error("the client is currently disconnected")]
-    Disconnected(),
+    Disconnected,
 }
 
 impl MqttError {

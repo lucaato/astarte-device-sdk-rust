@@ -59,7 +59,6 @@ use tokio::task::{JoinError, JoinHandle};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    builder::ConnectionConfig,
     error::Report,
     interfaces::Interfaces,
     properties::{encode_set_properties, PropertiesError},
@@ -73,7 +72,7 @@ use crate::{
 
 use super::{
     client::{AsyncClient, EventLoop},
-    config::{transport::TransportProvider, MqttTransport, PartialConfig},
+    config::{transport::TransportProvider, PartialConfig},
     error::MqttError,
     ClientId, MqttConfig, PairingError, PayloadError, SessionData,
 };
@@ -156,12 +155,15 @@ impl MqttConnection {
         state: impl Into<State>,
     ) -> Self {
         let connection = OnceLock::new();
-        connection.set(Connection {
-            client,
-            eventloop: SyncWrapper::new(eventloop),
-            provider,
-            session_synced: false,
-        });
+        connection
+            .set(Connection {
+                client,
+                eventloop: SyncWrapper::new(eventloop),
+                provider,
+                session_synced: false,
+            })
+            // NOTE this unwrap should never panic
+            .unwrap();
 
         Self {
             connection,
