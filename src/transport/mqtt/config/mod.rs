@@ -479,7 +479,7 @@ impl MqttConfig {
                     provider,
                     client_id.as_ref(),
                     &interfaces,
-                    &store_wrapper,
+                    store_wrapper,
                     timeout,
                 )
                 .await?;
@@ -495,7 +495,7 @@ impl MqttConfig {
                 (connection, client)
             }
             // handle timeout errors differently by creating a connection and a client without a transport
-            Err(MqttError::Pairing(PairingError::RequestTimeout(e))) => {
+            Err(MqttError::Pairing(PairingError::NoNetworkRequest(e))) => {
                 warn!(e=%Report::new(e), "got a timeout while cerating the transport");
 
                 let client = MqttClient::without_transport(

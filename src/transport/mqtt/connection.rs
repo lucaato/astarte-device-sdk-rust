@@ -297,7 +297,9 @@ impl MqttConnection {
         }
 
         loop {
-            let connection = self.state.ensure_transport(&mut self.connection).await?;
+            let Some(connection) = self.state.ensure_transport(&mut self.connection).await? else {
+                return Ok(false);
+            };
 
             let opt_publish = self
                 .state
@@ -392,18 +394,21 @@ impl State {
     async fn ensure_transport<'a>(
         &mut self,
         conn: &'a mut OnceLock<Connection>,
-    ) -> Result<&'a mut Connection, MqttError> {
+    ) -> Result<Option<&'a mut Connection>, MqttError> {
         let connection = if let State::NeedsTransport(needs_transport) = self {
             debug_assert!(conn.get().is_none());
 
             let connection = needs_transport.create_transport(conn).await?;
 
-            *self = State::Connecting(Connecting);
-
-            connection
+            if let Some(connection) = connection {
+                *self = State::Connecting(Connecting);
+                Some(connection)
+            } else {
+                None
+            }
         } else {
             // is safe if we are not in the neeeds transport state
-            conn.get_mut().unwrap()
+            Some(conn.get_mut().unwrap())
         };
 
         Ok(connection)
@@ -482,32 +487,39 @@ impl NeedsTransport {
     async fn create_transport<'a>(
         &mut self,
         conn: &'a mut OnceLock<Connection>,
-    ) -> Result<&'a mut Connection, MqttError> {
+    ) -> Result<Option<&'a mut Connection>, MqttError> {
         // NOTE pass timeout from outside this function
-        let MqttTransportOptions {
-            mqtt_opts,
-            net_opts: _net_opts,
-            provider,
-        } = self
+        match self
             .mqtt_config
             .try_create_transport(&self.config, Duration::from_secs(10))
-            .await?;
+            .await
+        {
+            Ok(MqttTransportOptions {
+                mqtt_opts,
+                net_opts: _net_opts,
+                provider,
+            }) => {
+                let (client, eventloop) = AsyncClient::new(mqtt_opts, self.config.channel_size);
 
-        let (client, eventloop) = AsyncClient::new(mqtt_opts, self.config.channel_size);
+                let connection = Connection {
+                    client: client.clone(),
+                    eventloop: SyncWrapper::new(eventloop),
+                    provider,
+                    session_synced: false,
+                };
 
-        let connection = Connection {
-            client: client.clone(),
-            eventloop: SyncWrapper::new(eventloop),
-            provider,
-            session_synced: false,
-        };
+                // TODO could use the async version since lock could wait if two threads are attempting to write (should not happen anyway)
+                let _ = conn.set(connection);
+                let _ = self.client_sender.set(client);
 
-        // TODO could use the async version since lock could wait if two threads are attempting to write (should not happen anyway)
-        let _ = conn.set(connection);
-        let _ = self.client_sender.set(client);
-
-        // SAFETY after set returns the oncelock is guaranteed to contain a value
-        Ok(conn.get_mut().unwrap())
+                Ok(conn.get_mut())
+            }
+            Err(MqttError::Pairing(PairingError::NoNetworkRequest(e))) => {
+                info!(error=%Report::new(e), "still no network, can't create the transport");
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 

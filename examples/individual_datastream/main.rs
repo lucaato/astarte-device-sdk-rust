@@ -130,12 +130,18 @@ async fn main() -> eyre::Result<()> {
     );
     mqtt_config.ignore_ssl_errors();
 
-    let (mut client, connection) = DeviceBuilder::new()
+    let res = DeviceBuilder::new()
         .store(MemoryStore::new())
         .interface_directory("./examples/individual_datastream/interfaces")?
         .connection(mqtt_config)
         .build()
-        .await?;
+        .await;
+
+    if let Err(ref e) = res {
+        println!("{e:?}");
+    }
+
+    let (mut client, connection) = res?;
 
     info!("Connection to Astarte established.");
 
@@ -233,9 +239,9 @@ fn init_tracing() -> eyre::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .with(
             tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(concat!(env!("CARGO_PKG_NAME"), "=debug").parse()?)
+                // .with_default_directive(concat!(env!("CARGO_PKG_NAME"), "=debug").parse()?)
                 .from_env_lossy()
-                .add_directive(LevelFilter::INFO.into()),
+                .add_directive(LevelFilter::DEBUG.into()),
         )
         .try_init()?;
 
