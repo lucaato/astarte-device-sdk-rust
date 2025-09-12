@@ -42,10 +42,9 @@ pub enum PairingError {
     /// The pairing request failed.
     #[error("error while sending or receiving request")]
     Request(reqwest::Error),
-    // TODO maybe remove this error and just check the kind with reqwest functions
     /// The pairing request failed with a timeout (missing connection).
-    #[error("got a timeout while waiting for a response")]
-    NoNetworkRequest(reqwest::Error),
+    #[error("got a timeout or connection error")]
+    RequestNoNetwork(reqwest::Error),
     /// Invalid credential secret
     #[error("couldn't set bearer header, invalid credential secret")]
     Header(#[from] reqwest::header::InvalidHeaderValue),
@@ -100,8 +99,9 @@ pub enum PairingError {
 
 impl From<reqwest::Error> for PairingError {
     fn from(err: reqwest::Error) -> Self {
+        // TODO decide which errors result in a missing connection and subsequent retry until connected
         if err.is_timeout() || err.is_request() {
-            PairingError::NoNetworkRequest(err)
+            PairingError::RequestNoNetwork(err)
         } else {
             PairingError::Request(err)
         }
@@ -114,6 +114,7 @@ pub(crate) struct ApiClient<'a> {
     pub(crate) device_id: &'a str,
     pairing_url: &'a Url,
     client: reqwest::Client,
+    timeout: Duration,
 }
 
 impl<'a> ApiClient<'a> {
@@ -142,6 +143,7 @@ impl<'a> ApiClient<'a> {
             device_id,
             pairing_url: provider.pairing_url(),
             client,
+            timeout,
         })
     }
 
@@ -174,7 +176,13 @@ impl<'a> ApiClient<'a> {
 
         let payload = ApiData::new(MqttV1Csr { csr });
 
-        let response = self.client.post(url).json(&payload).send().await?;
+        let response = self
+            .client
+            .post(url)
+            .json(&payload)
+            .timeout(self.timeout)
+            .send()
+            .await?;
 
         match response.status() {
             StatusCode::CREATED => {
@@ -196,7 +204,7 @@ impl<'a> ApiClient<'a> {
     pub async fn get_broker_url(&self) -> Result<Url, PairingError> {
         let url = self.url([])?;
 
-        let response = self.client.get(url).send().await?;
+        let response = self.client.get(url).timeout(self.timeout).send().await?;
 
         match response.status() {
             StatusCode::OK => {
@@ -341,8 +349,9 @@ pub(crate) mod tests {
             .await
             .expect("couldn't configure provider");
 
-        let client = ApiClient::from_transport(&provider, "realm", "device_id")
-            .expect("couldn't create api client");
+        let client =
+            ApiClient::from_transport(&provider, "realm", "device_id", Duration::from_secs(10))
+                .expect("couldn't create api client");
 
         let bundle = Bundle::generate_key("test", "device_id").unwrap();
 
@@ -378,8 +387,9 @@ pub(crate) mod tests {
             .await
             .expect("couldn't configure provider");
 
-        let client = ApiClient::from_transport(&provider, "realm", "device_id")
-            .expect("couldn't create api client");
+        let client =
+            ApiClient::from_transport(&provider, "realm", "device_id", Duration::from_secs(10))
+                .expect("couldn't create api client");
 
         let res = client
             .create_certificate("csr")
@@ -403,8 +413,9 @@ pub(crate) mod tests {
             .await
             .expect("couldn't configure provider");
 
-        let client = ApiClient::from_transport(&provider, "realm", "device_id")
-            .expect("couldn't create api client");
+        let client =
+            ApiClient::from_transport(&provider, "realm", "device_id", Duration::from_secs(10))
+                .expect("couldn't create api client");
 
         let res = client.get_broker_url().await.unwrap();
 
@@ -432,8 +443,9 @@ pub(crate) mod tests {
             .await
             .expect("couldn't configure provider");
 
-        let client = ApiClient::from_transport(&provider, "realm", "device_id")
-            .expect("couldn't create api client");
+        let client =
+            ApiClient::from_transport(&provider, "realm", "device_id", Duration::from_secs(10))
+                .expect("couldn't create api client");
 
         let res = client.get_broker_url().await.expect_err("should error");
 

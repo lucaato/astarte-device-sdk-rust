@@ -375,7 +375,6 @@ where
             connection,
             sender,
             store,
-            // partial_config,
         } = self.connection_config.connect(config).await?;
 
         // set max retention items in the store

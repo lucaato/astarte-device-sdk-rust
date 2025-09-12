@@ -72,8 +72,8 @@ pub enum MqttError {
     PubAckToken(#[source] TokenError),
     // TODO i'm not sure this is the correct error to use here
     /// The client is currently disconnected
-    #[error("the client is currently disconnected")]
-    Disconnected,
+    #[error("no client, connection with the server was not established")]
+    NoClient,
 }
 
 impl MqttError {

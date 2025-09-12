@@ -41,7 +41,7 @@ struct MqttV1Credential {
 }
 
 /// Obtain a credentials secret from the astarte API
-pub async fn register_device(
+pub async fn register_device_timeout(
     token: &str,
     pairing_url: &str,
     realm: &str,
@@ -81,6 +81,24 @@ pub async fn register_device(
             })
         }
     }
+}
+
+/// Obtain a credentials secret from the astarte API with a default timeout of 10 seconds
+pub async fn register_device(
+    token: &str,
+    pairing_url: &str,
+    realm: &str,
+    device_id: &str,
+) -> Result<String, PairingError> {
+    register_device_timeout(
+        token,
+        pairing_url,
+        realm,
+        device_id,
+        // TODO check if it does make sense to add a random default timeout?
+        Duration::from_secs(10),
+    )
+    .await
 }
 
 /// Generate a random device Id with UUIDv4.

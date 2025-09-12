@@ -130,7 +130,7 @@ impl<S> MqttClient<S> {
         state: Arc<SharedState>,
     ) -> Self {
         let client = OnceLock::new();
-        client.set(mqtt_client).unwrap(); // NOTE this should never manic
+        client.set(mqtt_client).unwrap(); // NOTE this should never panic or block
         let client = Arc::new(client);
 
         Self {
@@ -152,7 +152,7 @@ impl<S> MqttClient<S> {
     ) -> Result<Token<AckOfPub>, MqttError> {
         self.client
             .get()
-            .ok_or(MqttError::Disconnected)?
+            .ok_or(MqttError::NoClient)?
             .publish(
                 format!("{}/{interface}{path}", self.client_id),
                 reliability,
@@ -166,7 +166,7 @@ impl<S> MqttClient<S> {
     async fn subscribe(&self, interface_name: &str) -> Result<(), MqttError> {
         self.client
             .get()
-            .ok_or(MqttError::Disconnected)?
+            .ok_or(MqttError::NoClient)?
             .subscribe(
                 self.client_id.make_interface_wildcard(interface_name),
                 rumqttc::QoS::ExactlyOnce,
@@ -179,7 +179,7 @@ impl<S> MqttClient<S> {
     async fn unsubscribe(&self, interface_name: &str) -> Result<(), MqttError> {
         self.client
             .get()
-            .ok_or(MqttError::Disconnected)?
+            .ok_or(MqttError::NoClient)?
             .unsubscribe(self.client_id.make_interface_wildcard(interface_name))
             .await
             .map_err(MqttError::Unsubscribe)
@@ -419,7 +419,7 @@ where
 
         self.client
             .get()
-            .ok_or(MqttError::Disconnected)?
+            .ok_or(MqttError::NoClient)?
             .send_introspection(self.client_id.as_ref(), introspection)
             .await
             .map_err(|err| MqttError::publish("send introspection", err))?
@@ -444,7 +444,7 @@ where
 
         self.client
             .get()
-            .ok_or(MqttError::Disconnected)?
+            .ok_or(MqttError::NoClient)?
             .send_introspection(self.client_id.as_ref(), introspection)
             .await
             .map_err(|err| MqttError::publish("send introspection", err))?
@@ -484,7 +484,7 @@ where
 
         self.client
             .get()
-            .ok_or(MqttError::Disconnected)?
+            .ok_or(MqttError::NoClient)?
             .subscribe_interfaces(self.client_id.as_ref(), &server_interfaces)
             .await
             .map_err(MqttError::Subscribe)?;
@@ -495,7 +495,7 @@ where
         let res = self
             .client
             .get()
-            .ok_or(MqttError::Disconnected)?
+            .ok_or(MqttError::NoClient)?
             .send_introspection(self.client_id.as_ref(), introspection)
             .await
             .map_err(|err| MqttError::publish("send introspection", err));
@@ -537,7 +537,7 @@ where
 
         self.client
             .get()
-            .ok_or(MqttError::Disconnected)?
+            .ok_or(MqttError::NoClient)?
             .send_introspection(self.client_id.as_ref(), introspection)
             .await
             .map_err(|err| MqttError::publish("send introspection", err))?
@@ -568,7 +568,7 @@ where
     async fn disconnect(&mut self) -> Result<(), crate::Error> {
         self.client
             .get()
-            .ok_or(MqttError::Disconnected)?
+            .ok_or(MqttError::NoClient)?
             .disconnect()
             .await
             .map(drop)

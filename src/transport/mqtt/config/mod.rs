@@ -37,15 +37,15 @@ use crate::{
     store::{wrapper::StoreWrapper, StoreCapabilities},
     transport::mqtt::{
         config::transport::TransportProvider, connection::MqttConnection, error::MqttError,
-        registration::register_device, retention::MqttRetention, ClientId,
+        retention::MqttRetention, ClientId,
     },
 };
 
 use self::tls::is_env_ignore_ssl;
 
 use super::{
-    client::AsyncClient, pairing::ApiClient, Mqtt, MqttClient, PairingError, SharedState,
-    DEFAULT_CONNECTION_TIMEOUT, DEFAULT_KEEP_ALIVE,
+    client::AsyncClient, pairing::ApiClient, registration::register_device_timeout, Mqtt,
+    MqttClient, PairingError, SharedState, DEFAULT_CONNECTION_TIMEOUT, DEFAULT_KEEP_ALIVE,
 };
 
 mod tls;
@@ -335,7 +335,7 @@ impl MqttConfig {
             }
         }
 
-        let secret = register_device(
+        let secret = register_device_timeout(
             pairing_token,
             &self.pairing_url,
             &self.realm,
@@ -495,8 +495,8 @@ impl MqttConfig {
                 (connection, client)
             }
             // handle timeout errors differently by creating a connection and a client without a transport
-            Err(MqttError::Pairing(PairingError::NoNetworkRequest(e))) => {
-                warn!(e=%Report::new(e), "got a timeout while cerating the transport");
+            Err(MqttError::Pairing(PairingError::RequestNoNetwork(e))) => {
+                warn!(error=%Report::new(e), "got a timeout while cerating the transport");
 
                 let client = MqttClient::without_transport(
                     client_id.clone(),
@@ -507,7 +507,7 @@ impl MqttConfig {
                 let connection = MqttConnection::without_transport(
                     self.clone(),
                     config.clone(),
-                    // NOTE pass client to connection so that an update to the connection can
+                    // NOTE pass client to connection so that the [`AsyncClient`] used by the clients can be updated.
                     Arc::clone(&client.client),
                 );
 
@@ -524,7 +524,7 @@ impl MqttConfig {
             state,
         );
 
-        return Ok(MqttTransport { connection, client });
+        Ok(MqttTransport { connection, client })
     }
 }
 
