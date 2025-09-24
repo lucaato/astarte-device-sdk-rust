@@ -933,6 +933,13 @@ impl WaitAcks {
                 debug!("next event polled");
 
                 match res {
+                    Ok(Event::Incoming(rumqttc::Packet::ConnAck(connack))) => {
+                        debug!("connack received, initializing connection");
+
+                        Next::state(Handshake {
+                            session_present: connack.session_present,
+                        })
+                    }
                     Ok(event) => Next::handle_event(event),
                     Err(err) => Next::handle_error(err),
                 }
@@ -1072,12 +1079,13 @@ impl Next {
         };
 
         match incoming {
+            // FIXME according to the MQTT spec the connack is only sent after the connack
+            // here we are also handling connack packets received after the first one
+            // this situation should probably be treated as a critical error
             rumqttc::Packet::ConnAck(connack) => {
-                debug!("connack received, initializing connection");
+                error!(connack=?connack, "connack received after the initial connection, broker bug");
 
-                Next::state(Handshake {
-                    session_present: connack.session_present,
-                })
+                Next::Same
             }
             rumqttc::Packet::Publish(publish) => {
                 debug!("incoming publish on {}", publish.topic);
