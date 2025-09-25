@@ -32,7 +32,9 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::{
-    builder::{BuildConfig, ConnectionConfig, DeviceTransport, DEFAULT_CHANNEL_SIZE},
+    builder::{
+        BuildConfig, ConnectionConfig, ConnectionErrorCause, DeviceTransport, DEFAULT_CHANNEL_SIZE,
+    },
     error::Report,
     store::{wrapper::StoreWrapper, StoreCapabilities},
     transport::mqtt::{
@@ -452,73 +454,61 @@ impl MqttConfig {
         let (retention_tx, retention_rx) = flume::bounded(config.channel_size);
         let retention = MqttRetention::new(retention_rx);
 
-        let (connection, client) = match self.try_create_transport(&config, timeout).await {
-            Ok(MqttTransportOptions {
-                mqtt_opts,
-                net_opts,
-                provider,
-            }) => {
-                let (client, mut eventloop) =
-                    AsyncClient::new(mqtt_opts, self.bounded_channel_size);
-                eventloop.set_network_options(net_opts);
+        let MqttTransportOptions {
+            mqtt_opts,
+            net_opts,
+            provider,
+        } = self.try_create_transport(&config, timeout).await?;
 
-                let interfaces = state.interfaces.read().await;
+        let (client, mut eventloop) = AsyncClient::new(mqtt_opts, self.bounded_channel_size);
+        eventloop.set_network_options(net_opts);
 
-                // NOTE if this function times out no error is returned
-                // but the connection will be in a Connecting state
-                let connection = MqttConnection::wait_connack(
-                    client.clone(),
-                    eventloop,
-                    provider,
-                    client_id.as_ref(),
-                    &interfaces,
-                    store_wrapper,
-                    timeout,
-                )
-                .await?;
+        let interfaces = state.interfaces.read().await;
 
-                let client = MqttClient::new(
-                    client_id.clone(),
-                    client,
-                    retention_tx,
-                    store_wrapper.clone(),
-                    Arc::clone(&state),
-                );
+        // NOTE if this function times out no error is returned
+        // but the connection will be in a Connecting state
+        let connection = MqttConnection::wait_connack(
+            client.clone(),
+            eventloop,
+            provider,
+            client_id.as_ref(),
+            &interfaces,
+            store_wrapper,
+            timeout,
+        )
+        .await?;
 
-                (connection, client)
-            }
-            // handle timeout errors differently by creating a connection and a client without a transport
-            Err(MqttError::Pairing(PairingError::RequestNoNetwork(e))) => {
-                warn!(error=%Report::new(e), "got a timeout while creating the transport, initializing offline device");
-
-                let client = MqttClient::without_transport(
-                    client_id.clone(),
-                    retention_tx,
-                    store_wrapper.clone(),
-                    Arc::clone(&state),
-                );
-                let connection = MqttConnection::without_transport(
-                    self.clone(),
-                    config.clone(),
-                    // NOTE pass client to connection so that the [`AsyncClient`] used by the clients can be updated.
-                    Arc::clone(&client.client),
-                    timeout,
-                );
-
-                (connection, client)
-            }
-            Err(e) => return Err(e),
-        };
+        let client = MqttClient::new(
+            client_id.clone(),
+            client,
+            retention_tx,
+            store_wrapper.clone(),
+            Arc::clone(&state),
+        );
 
         let connection = Mqtt::new(
             client_id,
             connection,
             retention,
             store_wrapper.clone(),
-            state,
+            Arc::clone(&state),
         );
 
         Ok(MqttTransport { connection, client })
+    }
+}
+
+impl ConnectionErrorCause for MqttError {
+    fn caused_by_missing_connection(&self) -> bool {
+        if let MqttError::Pairing(PairingError::Request(err)) = self {
+            return if err.is_timeout() || err.is_request() {
+                true
+            } else {
+                false
+            };
+        }
+
+        false
     }
 }
 

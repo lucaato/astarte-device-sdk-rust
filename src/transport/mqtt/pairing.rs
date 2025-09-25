@@ -41,10 +41,7 @@ pub enum PairingError {
     InvalidUrl(#[from] ParseError),
     /// The pairing request failed.
     #[error("error while sending or receiving request")]
-    Request(reqwest::Error),
-    /// The pairing request failed with a timeout (missing connection).
-    #[error("got a timeout or connection error")]
-    RequestNoNetwork(reqwest::Error),
+    Request(#[from] reqwest::Error),
     /// Invalid credential secret
     #[error("couldn't set bearer header, invalid credential secret")]
     Header(#[from] reqwest::header::InvalidHeaderValue),
@@ -95,16 +92,6 @@ pub enum PairingError {
     /// Couldn't read native certificates
     #[error("couldn't read native certificates")]
     ReadNativeCerts(#[source] tokio::task::JoinError),
-}
-
-impl From<reqwest::Error> for PairingError {
-    fn from(err: reqwest::Error) -> Self {
-        if err.is_timeout() || err.is_request() {
-            PairingError::RequestNoNetwork(err)
-        } else {
-            PairingError::Request(err)
-        }
-    }
 }
 
 /// Struct with the information for the pairing

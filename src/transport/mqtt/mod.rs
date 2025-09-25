@@ -103,22 +103,6 @@ pub struct MqttClient<S> {
 }
 
 impl<S> MqttClient<S> {
-    /// Creates a new client that is missing the transport
-    pub(crate) fn without_transport(
-        client_id: ClientId,
-        retention: RetSender,
-        store: StoreWrapper<S>,
-        state: Arc<SharedState>,
-    ) -> Self {
-        Self {
-            client_id,
-            client: Arc::new(OnceLock::new()),
-            retention,
-            store,
-            state,
-        }
-    }
-
     /// Create a new client.
     pub(crate) fn new(
         client_id: ClientId,

@@ -37,7 +37,6 @@ pub(crate) struct SharedState {
     pub(crate) interfaces: RwLock<Interfaces>,
     pub(crate) volatile_store: VolatileStore,
     pub(crate) retention_ctx: retention::Context,
-    pub(crate) status: ConnectionStatus,
 }
 
 impl SharedState {
@@ -47,7 +46,6 @@ impl SharedState {
             interfaces: RwLock::new(interfaces),
             volatile_store,
             retention_ctx: retention::Context::new(),
-            status: ConnectionStatus::new(),
         }
     }
 }

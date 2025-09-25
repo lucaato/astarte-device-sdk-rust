@@ -42,7 +42,7 @@ mod incoming;
 mod resend;
 
 /// Handles the messages from the device and astarte.
-pub trait EventLoop {
+pub trait EventLoop: Sized {
     /// Poll updates from the connection implementation, can be placed in a loop to receive data.
     ///
     /// This is a blocking function. It should be placed on a dedicated thread/task or as the main
@@ -73,7 +73,7 @@ pub trait EventLoop {
     ///     connection.handle_events().await;
     /// }
     /// ```
-    fn handle_events(self) -> impl Future<Output = Result<(), crate::Error>> + Send;
+    fn handle_next(self) -> impl Future<Output = Result<Self, crate::Error>> + Send;
 }
 
 /// Astarte device implementation.
@@ -82,13 +82,24 @@ pub struct DeviceConnection<C>
 where
     C: Connection,
 {
-    tx: flume::Sender<Result<DeviceEvent, RecvError>>,
-    store: StoreWrapper<C::Store>,
-    connection: C,
-    sender: C::Sender,
     state: Arc<SharedState>,
     resend: Option<JoinHandle<()>>,
     backoff: ExponentialIter,
+    state: ConnectionState,
+}
+
+pub enum ConnectionState<C>
+where
+    C: Connection,
+{
+    Disconnected {
+    },
+    Up {
+        tx: flume::Sender<Result<DeviceEvent, RecvError>>,
+        store: StoreWrapper<C::Store>,
+        connection: C,
+        sender: C::Sender,
+    },
 }
 
 impl<C> DeviceConnection<C>
@@ -199,6 +210,8 @@ where
     C: Connection + Reconnect + Receive + 'static,
     C::Sender: Publish + 'static,
 {
+    fn handle_next(self) -> impl Future<Output = Result<Self, crate::Error>> + Send {}
+
     async fn handle_events(mut self) -> Result<(), crate::Error> {
         self.init_stored_retention().await?;
 

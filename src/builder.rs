@@ -115,7 +115,7 @@ pub struct NoStore;
 pub struct NoConnect;
 
 /// Struct used to pass the connection configuration to the [`ConnectionConfig`]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BuildConfig<S> {
     pub(crate) channel_size: usize,
     pub(crate) writable_dir: Option<PathBuf>,
@@ -392,24 +392,33 @@ where
             timeout: self.timeout,
         };
 
-        let DeviceTransport {
+        let (client, connection) = match self.connection_config.connect(config).await {
+            Ok(DeviceTransport {
             connection,
             sender,
             store,
-        } = self.connection_config.connect(config).await?;
+        }) => {
+            // set max retention items in the store
+            if let Some(retention) = store.get_retention() {
+                retention
+                    .set_max_retention_items(self.stored_retention)
+                    .await?;
+            }
 
-        // set max retention items in the store
-        if let Some(retention) = store.get_retention() {
-            retention
-                .set_max_retention_items(self.stored_retention)
-                .await?;
-        }
+            let client =
+                DeviceClient::new(sender.clone(), rx_client, store.clone(), Arc::clone(&state));
 
-        let client =
-            DeviceClient::new(sender.clone(), rx_client, store.clone(), Arc::clone(&state));
+            let connection = DeviceConnection::new(tx_connection, store, state, connection, sender);
 
-        let connection = DeviceConnection::new(tx_connection, store, state, connection, sender);
+                (client, connection)
+            },
+            Err(e) if e.caused_by_missing_connection() => {
 
+            },
+            Err(e) => return Err(e);
+        };
+
+        // TODO make client and connection the same thing, a client should be able to be created from a connection
         Ok((client, connection))
     }
 }
@@ -430,6 +439,10 @@ where
     pub(crate) store: StoreWrapper<C::Store>,
 }
 
+pub trait ConnectionErrorCause {
+    fn caused_by_missing_connection(&self) -> bool;
+}
+
 /// Crate private connection implementation.
 pub trait ConnectionConfig<S> {
     /// Type of the store used by the connection
@@ -437,7 +450,9 @@ pub trait ConnectionConfig<S> {
     /// Type of the constructed Connection
     type Conn: Connection;
     /// Type of the error got while opening the connection
-    type Err;
+    // TODO add a base error trait that should be implemented for
+    // underlying connection error to signal to the builder a missing connection
+    type Err: ConnectionErrorCause;
 
     /// Connect method that consumes self to construct a working connection
     /// This method is called internally by the builder.

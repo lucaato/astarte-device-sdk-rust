@@ -232,23 +232,6 @@ pub(crate) struct MqttConnection {
 }
 
 impl MqttConnection {
-    pub(crate) fn without_transport(
-        mqtt_config: MqttConfig,
-        config: PartialConfig,
-        client_sender: Arc<OnceLock<AsyncClient>>,
-        timeout: Duration,
-    ) -> Self {
-        Self {
-            link: MqttLinkState::Absent(NeedsTransport {
-                mqtt_config,
-                config,
-                client_sender,
-            }),
-            buff: VecDeque::new(),
-            timeout,
-        }
-    }
-
     pub(crate) fn new(
         client: AsyncClient,
         eventloop: EventLoop,
