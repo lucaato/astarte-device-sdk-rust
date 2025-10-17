@@ -178,6 +178,8 @@ where
                         sender.handle_client_msg(msg).await?;
                     }
                     Either::Right(()) => {
+                        retention.reset_all_publishes().await?;
+
                         sender.resend_volatile_publishes().await?;
 
                         sender.resend_stored_publishes().await?;
@@ -758,6 +760,9 @@ where
     where
         T: Publish,
     {
+        // always resets the stored publish to allow them to be resent everytime
+        retention.reset_all_publishes().await?;
+
         let Some(retention) = self.store.get_retention() else {
             return Ok(());
         };
@@ -798,8 +803,6 @@ where
         let Some(retention) = self.store.get_retention() else {
             return Ok(());
         };
-
-        retention.reset_all_publishes().await?;
 
         self.resend_stored_publishes().await?;
 

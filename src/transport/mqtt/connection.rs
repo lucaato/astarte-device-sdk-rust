@@ -204,6 +204,9 @@ impl MqttConnection {
     where
         S: PropertyStore,
     {
+        // always enable clean session
+        enable_clean_session(self.connection.eventloop_mut());
+
         let mut exp_back = ExponentialIter::default();
 
         // Wait till we are in the Init state, so we do not need to handle the incoming publishes,
@@ -216,8 +219,6 @@ impl MqttConnection {
 
             if let Some(publish) = opt_publish {
                 debug!("received a publish");
-
-                disable_clean_session(self.connection.eventloop_mut());
 
                 self.buff.push_back(publish);
             }
@@ -232,19 +233,19 @@ impl MqttConnection {
             }
         }
 
-        disable_clean_session(self.connection.eventloop_mut());
+        enable_clean_session(self.connection.eventloop_mut());
 
         Ok(())
     }
 }
 
 #[cfg(not(test))]
-fn disable_clean_session(eventloop: &mut EventLoop) {
-    eventloop.mqtt_options.set_clean_session(false);
+fn enable_clean_session(eventloop: &mut EventLoop) {
+    eventloop.mqtt_options.set_clean_session(true);
 }
 
 #[cfg(test)]
-fn disable_clean_session(_eventloop: &mut EventLoop) {}
+fn enable_clean_session(_eventloop: &mut EventLoop) {}
 
 /// Struct to hold the connection and client to be passed to the state.
 ///
