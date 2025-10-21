@@ -314,7 +314,7 @@ pub(crate) trait StoredRetentionExt: StoredRetention {
         individual: &ValidatedIndividual,
         value: &[u8],
     ) -> Result<(), RetentionError> {
-        // Always store as not sent, so we can mark it afterwards
+        // Always store as not sent, so the caller can be more explicit about the state
         let publish = PublishInfo::from_individual(false, individual, value);
 
         self.store_publish(id, publish).await
@@ -326,7 +326,7 @@ pub(crate) trait StoredRetentionExt: StoredRetention {
         obj: &ValidatedObject,
         value: &[u8],
     ) -> Result<(), RetentionError> {
-        // Always store as not sent, so we can mark it afterwards
+        // Always store as not sent, so the caller can be more explicit about the state
         let publish = PublishInfo::from_obj(false, obj, value);
 
         self.store_publish(id, publish).await
@@ -358,11 +358,6 @@ pub(crate) trait StoredRetentionExt: StoredRetention {
             .await?;
 
         Ok(())
-    }
-
-    /// It will mark the stored publish as sent
-    async fn mark_sent(&self, id: &Id) -> Result<(), RetentionError> {
-        self.update_sent_flag(id, true).await
     }
 }
 

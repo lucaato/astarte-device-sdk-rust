@@ -68,7 +68,10 @@ use crate::{
     retention::{
         memory::SharedVolatileStore, PublishInfo, RetentionId, StoredRetention, StoredRetentionExt,
     },
-    store::{error::StoreError, wrapper::StoreWrapper, PropertyStore, StoreCapabilities},
+    store::{
+        before_send, check_stored_send, error::StoreError, wrapper::StoreWrapper, PropertyStore,
+        StoreCapabilities,
+    },
     validate::{ValidatedIndividual, ValidatedObject, ValidatedUnset},
     AstarteType, Error, Interface, Timestamp,
 };
@@ -240,17 +243,6 @@ impl<S> MqttClient<S> {
                 self.mark_received(&id).await?;
             }
             Reliability::Guaranteed | Reliability::Unique => {
-                match id {
-                    RetentionId::Volatile(id) => {
-                        self.volatile.mark_sent(&id, true).await;
-                    }
-                    RetentionId::Stored(id) => {
-                        if let Some(retention) = self.store.get_retention() {
-                            retention.mark_sent(&id).await?;
-                        }
-                    }
-                }
-
                 self.retention
                     .send((id, notice))
                     .map_err(|_| Error::Disconnected)?;
@@ -301,23 +293,26 @@ where
         id: RetentionId,
         validated: ValidatedIndividual,
     ) -> Result<(), crate::Error> {
+        debug_assert!(
+            !validated.retention.is_discard(),
+            "send stored called for retention discard"
+        );
+
         let buf = payload::serialize_individual(&validated.data, validated.timestamp)
             .map_err(MqttError::Payload)?;
 
-        let notice = self
+        before_send(&self.store, &mut self.volatile, &id).await?;
+
+        let notice_res = self
             .send(
                 &validated.interface,
                 &validated.path,
                 validated.reliability.into(),
                 buf,
             )
-            .await?;
+            .await;
 
-        debug_assert!(
-            !validated.retention.is_discard(),
-            "send stored called for retention discard"
-        );
-
+        let notice = check_stored_send(&self.store, &mut self.volatile, &id, notice_res).await?;
         self.mark_sent(id, validated.reliability, notice).await?;
 
         Ok(())
@@ -328,18 +323,26 @@ where
         id: RetentionId,
         validated: ValidatedObject,
     ) -> Result<(), crate::Error> {
+        debug_assert!(
+            !validated.retention.is_discard(),
+            "send stored called for retention discard"
+        );
+
         let buf = payload::serialize_object(&validated.data, validated.timestamp)
             .map_err(MqttError::Payload)?;
 
-        let notice = self
+        before_send(&self.store, &mut self.volatile, &id).await?;
+
+        let notice_res = self
             .send(
                 &validated.interface,
                 &validated.path,
                 validated.reliability.into(),
                 buf,
             )
-            .await?;
+            .await;
 
+        let notice = check_stored_send(&self.store, &mut self.volatile, &id, notice_res).await?;
         self.mark_sent(id, validated.reliability, notice).await?;
 
         Ok(())
@@ -350,20 +353,23 @@ where
         id: RetentionId,
         data: PublishInfo<'_>,
     ) -> Result<(), crate::Error> {
-        let notice = self
+        debug_assert!(
+            self.store.get_retention().is_some(),
+            "resend stored called without store that supports retention"
+        );
+
+        before_send(&self.store, &mut self.volatile, &id).await?;
+
+        let notice_res = self
             .send(
                 &data.interface,
                 &data.path,
                 data.reliability.into(),
                 data.value.into(),
             )
-            .await?;
+            .await;
 
-        debug_assert!(
-            self.store.get_retention().is_some(),
-            "resend stored called without store that supports retention"
-        );
-
+        let notice = check_stored_send(&self.store, &mut self.volatile, &id, notice_res).await?;
         self.mark_sent(id, data.reliability, notice).await?;
 
         Ok(())

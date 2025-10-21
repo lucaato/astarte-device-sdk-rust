@@ -186,6 +186,10 @@ impl MqttConnection {
         S: PropertyStore,
     {
         let mut mqtt_connection = Self::new(client, eventloop, provider, Connecting);
+        // NOTE always enable clean session during the first connection
+        // since we can't persistently store in flight mqtt messages this ensures that we don't receive packet ids
+        // of the previous session
+        set_clean_session(mqtt_connection.connection.eventloop_mut(), true);
 
         mqtt_connection
             .connect(client_id, interfaces, store)
@@ -204,9 +208,6 @@ impl MqttConnection {
     where
         S: PropertyStore,
     {
-        // always enable clean session
-        enable_clean_session(self.connection.eventloop_mut());
-
         let mut exp_back = ExponentialIter::default();
 
         // Wait till we are in the Init state, so we do not need to handle the incoming publishes,
@@ -233,19 +234,17 @@ impl MqttConnection {
             }
         }
 
-        enable_clean_session(self.connection.eventloop_mut());
-
         Ok(())
     }
 }
 
 #[cfg(not(test))]
-fn enable_clean_session(eventloop: &mut EventLoop) {
-    eventloop.mqtt_options.set_clean_session(true);
+fn set_clean_session(eventloop: &mut EventLoop, clean: bool) {
+    eventloop.mqtt_options.set_clean_session(clean);
 }
 
 #[cfg(test)]
-fn enable_clean_session(_eventloop: &mut EventLoop) {}
+fn set_clean_session(_eventloop: &mut EventLoop, _clean: bool) {}
 
 /// Struct to hold the connection and client to be passed to the state.
 ///
@@ -424,6 +423,9 @@ impl Connecting {
         match event {
             Event::Incoming(Packet::ConnAck(connack)) => {
                 trace!("connack received");
+
+                // permanently set the clean session to false since the mqtt library will keep inflight messages in memory
+                set_clean_session(conn.eventloop_mut(), false);
 
                 Next::state(Handshake {
                     session_present: connack.session_present,

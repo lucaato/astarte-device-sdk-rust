@@ -178,8 +178,6 @@ where
                         sender.handle_client_msg(msg).await?;
                     }
                     Either::Right(()) => {
-                        retention.reset_all_publishes().await?;
-
                         sender.resend_volatile_publishes().await?;
 
                         sender.resend_stored_publishes().await?;
@@ -737,18 +735,34 @@ where
     where
         T: Publish,
     {
-        while let Some(item) = self.volatile_store.pop_next().await {
-            match item {
-                ItemValue::Individual(individual) => {
-                    self.sender.send_individual(individual).await?;
-                }
-                ItemValue::Object(object) => {
-                    self.sender.send_object(object).await?;
+        let mut buf = Vec::with_capacity(DEFAULT_CHANNEL_SIZE);
+
+        loop {
+            let count = self
+                .volatile_store
+                .get_unsent(&mut buf, DEFAULT_CHANNEL_SIZE)
+                .await;
+
+            trace!("loaded {count} volatile publishes");
+
+            for (id, value) in buf.drain(..) {
+                match value {
+                    ItemValue::Individual(individual) => {
+                        self.sender
+                            .send_individual_stored(RetentionId::Volatile(id), individual)
+                            .await?;
+                    }
+                    ItemValue::Object(object) => {
+                        self.sender
+                            .send_object_stored(RetentionId::Volatile(id), object)
+                            .await?;
+                    }
                 }
             }
 
-            // Let's check if we are still connected after the await
-            if self.status.is_connected() {
+            if count == 0 || count < DEFAULT_CHANNEL_SIZE {
+                trace!("all volatile publishes sent");
+
                 break;
             }
         }
@@ -760,14 +774,11 @@ where
     where
         T: Publish,
     {
-        // always resets the stored publish to allow them to be resent everytime
-        retention.reset_all_publishes().await?;
-
         let Some(retention) = self.store.get_retention() else {
             return Ok(());
         };
 
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(DEFAULT_CHANNEL_SIZE);
 
         debug!("start sending store publishes");
         loop {
@@ -788,8 +799,6 @@ where
 
                 break;
             }
-
-            buf.clear();
         }
 
         Ok(())
@@ -803,6 +812,8 @@ where
         let Some(retention) = self.store.get_retention() else {
             return Ok(());
         };
+
+        retention.reset_all_publishes().await?;
 
         self.resend_stored_publishes().await?;
 
