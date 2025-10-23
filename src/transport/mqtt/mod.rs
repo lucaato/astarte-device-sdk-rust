@@ -65,9 +65,7 @@ use crate::{
     },
     interfaces::{self, Interfaces, Introspection},
     properties,
-    retention::{
-        memory::SharedVolatileStore, PublishInfo, RetentionId, StoredRetention, StoredRetentionExt,
-    },
+    retention::{memory::SharedVolatileStore, PublishInfo, RetentionId, StoredRetention},
     store::{
         before_send, check_stored_send, error::StoreError, wrapper::StoreWrapper, PropertyStore,
         StoreCapabilities,

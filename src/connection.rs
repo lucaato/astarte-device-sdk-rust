@@ -735,6 +735,9 @@ where
     where
         T: Publish,
     {
+        // always reset sent flag (this work with a clean session always set to true)
+        self.volatile_store.reset_sent().await;
+
         let mut buf = Vec::with_capacity(DEFAULT_CHANNEL_SIZE);
 
         loop {
@@ -777,6 +780,9 @@ where
         let Some(retention) = self.store.get_retention() else {
             return Ok(());
         };
+
+        // always reset sent flag (this work with a clean session always set to true)
+        retention.reset_all_publishes().await?;
 
         let mut buf = Vec::with_capacity(DEFAULT_CHANNEL_SIZE);
 

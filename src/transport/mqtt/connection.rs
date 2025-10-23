@@ -424,8 +424,9 @@ impl Connecting {
             Event::Incoming(Packet::ConnAck(connack)) => {
                 trace!("connack received");
 
+                // NOTE currently we only support using a non persistent session
                 // permanently set the clean session to false since the mqtt library will keep inflight messages in memory
-                set_clean_session(conn.eventloop_mut(), false);
+                // set_clean_session(conn.eventloop_mut(), false);
 
                 Next::state(Handshake {
                     session_present: connack.session_present,

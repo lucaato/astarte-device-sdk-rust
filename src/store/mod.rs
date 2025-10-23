@@ -29,7 +29,7 @@ use crate::{
         reference::{MappingRef, PropertyRef},
         Ownership,
     },
-    retention::{memory::SharedVolatileStore, Id, RetentionError, RetentionId, StoredRetention},
+    retention::{memory::SharedVolatileStore, RetentionError, RetentionId, StoredRetention},
     types::AstarteType,
 };
 

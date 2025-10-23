@@ -682,13 +682,9 @@ mod tests {
             }
         }
 
-        let check_is_unsent_element = |item: &ItemValue| match item {
-            ItemValue::Individual(ref individual)
-                if individual.interface == "interface_check" && individual.version_major == 1 =>
-            {
-                true
-            }
-            _ => false,
+        let check_is_unsent_element = |item: &ItemValue| {
+            matches!(item, ItemValue::Individual(ref individual)
+                if individual.interface == "interface_check" && individual.version_major == 1)
         };
 
         let mut buf = Vec::with_capacity(4);
