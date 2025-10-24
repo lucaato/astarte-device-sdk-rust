@@ -732,9 +732,20 @@ where
     S: StoreCapabilities + PropertyStore,
 {
     async fn reconnect(&mut self, interfaces: &Interfaces) -> Result<(), crate::Error> {
-        self.connection
+        let session_present = self
+            .connection
             .connect(self.client_id.as_ref(), interfaces, &self.store)
             .await?;
+
+        if !session_present {
+            // when the session is not present we reset the sent flags for stored messages
+
+            self.volatile.reset_sent().await;
+
+            if let Some(retention) = self.store.get_retention() {
+                retention.reset_all_publishes().await?;
+            }
+        }
 
         Ok(())
     }
@@ -937,7 +948,9 @@ pub(crate) mod test {
                 )
                 .await
                 .expect("failed to configure transport provider"),
-                self::connection::Connected,
+                self::connection::Connected {
+                    session_present: false,
+                },
             ),
             MqttRetention::new(ret_rx),
             store.clone(),

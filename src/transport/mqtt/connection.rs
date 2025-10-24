@@ -204,7 +204,7 @@ impl MqttConnection {
         client_id: ClientId<&str>,
         interfaces: &Interfaces,
         store: &StoreWrapper<S>,
-    ) -> Result<(), StoreError>
+    ) -> Result<bool, StoreError>
     where
         S: PropertyStore,
     {
@@ -234,7 +234,7 @@ impl MqttConnection {
             }
         }
 
-        Ok(())
+        Ok(matches!(self.state, State::Connected(c) if c.is_session_present()))
     }
 }
 
@@ -512,7 +512,10 @@ impl Handshake {
             Ok(())
         });
 
-        Next::state(WaitAcks { handle })
+        Next::state(WaitAcks {
+            handle,
+            session_present: self.session_present,
+        })
     }
 
     /// Subscribes to the passed list of interfaces
@@ -658,6 +661,7 @@ impl From<Handshake> for State {
 #[derive(Debug)]
 pub(crate) struct WaitAcks {
     handle: JoinHandle<Result<(), InitError>>,
+    session_present: bool,
 }
 
 impl WaitAcks {
@@ -672,7 +676,7 @@ impl WaitAcks {
             res = &mut self.handle => {
                 debug!("task joined");
 
-                Self::handle_join(res)
+                Self::handle_join(res, self.session_present)
             }
             // I hope this is cancel safe
             res = conn.eventloop_mut().poll() => {
@@ -688,12 +692,15 @@ impl WaitAcks {
         }
     }
 
-    fn handle_join(res: Result<Result<(), InitError>, JoinError>) -> Result<Next, StoreError> {
+    fn handle_join(
+        res: Result<Result<(), InitError>, JoinError>,
+        session_present: bool,
+    ) -> Result<Next, StoreError> {
         // Don't move the handle to await the task
         match res {
             Ok(Ok(())) => {
                 info!("device connected");
-                Ok(Next::state(Connected))
+                Ok(Next::state(Connected { session_present }))
             }
             Ok(Err(InitError::Unset(err))) => {
                 error!(error = %Report::new(&err), "init task failed");
@@ -736,9 +743,15 @@ impl From<WaitAcks> for State {
 
 /// Established connection to Astarte
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Connected;
+pub(crate) struct Connected {
+    pub(crate) session_present: bool,
+}
 
 impl Connected {
+    pub(crate) fn is_session_present(&self) -> bool {
+        self.session_present
+    }
+
     async fn poll(&mut self, conn: &mut Connection) -> Next {
         match conn.eventloop_mut().poll().await {
             Ok(event) => Next::handle_event(event),
