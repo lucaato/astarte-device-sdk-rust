@@ -25,7 +25,7 @@
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use astarte_interfaces::schema::{Aggregation, InterfaceType};
 use astarte_interfaces::{
@@ -387,7 +387,7 @@ where
 pub struct Grpc {
     uuid: Uuid,
     client: MsgHubClient,
-    stream: SyncWrapper<Streaming<MessageHubEvent>>,
+    stream: Option<SyncWrapper<Streaming<MessageHubEvent>>>,
 }
 
 impl Grpc {
@@ -399,8 +399,20 @@ impl Grpc {
         Self {
             uuid,
             client,
-            stream: SyncWrapper::new(stream),
+            stream: Some(SyncWrapper::new(stream)),
         }
+    }
+
+    pub(crate) fn new_disconnected(uuid: Uuid, client: MsgHubClient) -> Self {
+        Self {
+            uuid,
+            client,
+            stream: None,
+        }
+    }
+
+    pub(crate) fn is_connected(&self) -> bool {
+        self.stream.is_some()
     }
 
     /// Polls a message from the tonic stream and tries reattaching if necessary
@@ -408,7 +420,11 @@ impl Grpc {
     /// An [`Option`] is returned directly from the [`tonic::codec::Streaming::message`] method.
     /// A result of [`None`] signals a disconnection and should be handled by the caller
     async fn next_message(&mut self) -> Result<Option<MessageHubEvent>, tonic::Status> {
-        self.stream.get_mut().message().await
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(None);
+        };
+
+        stream.get_mut().message().await
     }
 
     async fn attach(
@@ -543,12 +559,13 @@ impl Reconnect for Grpc {
 
         match Grpc::attach(&mut self.client, data.clone()).await {
             Ok(stream) => {
-                self.stream = SyncWrapper::new(stream);
+                self.stream = Some(SyncWrapper::new(stream));
 
                 Ok(true)
             }
             Err(err) => {
                 error!(error = %Report::new(err), "error while trying to reconnect");
+                self.stream = None;
 
                 Ok(false)
             }
@@ -612,33 +629,37 @@ where
         self,
         config: BuildConfig<S>,
     ) -> Result<DeviceTransport<Self::Conn>, Self::Err> {
-        let channel = self.endpoint.connect().await.map_err(GrpcError::from)?;
+        let channel = self.endpoint.connect_lazy();
         let node_id_interceptor = NodeIdInterceptor::new(self.uuid);
         let mut client = MessageHubClient::with_interceptor(channel, node_id_interceptor);
-
-        let stream = {
-            let interfaces = config.state.interfaces.read().await;
-            let node_data = NodeData::try_from(&*interfaces)?;
-
-            Grpc::attach(&mut client, node_data).await?
-        };
-
         let store = StoreWrapper::new(GrpcStore::new(client.clone()));
 
         // HACK: disable the volatile retention
         config.state.volatile_store.set_capacity(0).await;
-
         let state = Arc::clone(&config.state);
 
         let sender = GrpcClient::new(client.clone(), store.clone(), state);
-        let connection = Grpc::new(self.uuid, client, stream);
+
+        let stream_res = {
+            let interfaces = config.state.interfaces.read().await;
+            let node_data = NodeData::try_from(&*interfaces)?;
+
+            Grpc::attach(&mut client, node_data).await
+        };
+
+        let connection = match stream_res {
+            Ok(stream) => Grpc::new(self.uuid, client, stream),
+            Err(err) => {
+                error!(err=%Report::new(err), "error while connecting to message hub");
+                Grpc::new_disconnected(self.uuid, client)
+            }
+        };
 
         Ok(DeviceTransport {
             sender,
+            connected: connection.is_connected(),
             connection,
             store,
-            // NOTE if the attach is successful we have correctly established a connection with the grpc server
-            connected: true,
         })
     }
 }
