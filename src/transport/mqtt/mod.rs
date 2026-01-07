@@ -402,6 +402,29 @@ where
         Ok(())
     }
 
+    /// Resend previously stored property.
+    async fn resend_stored_property(
+        &mut self,
+        property_data: OptStoredProp,
+    ) -> Result<(), crate::Error> {
+        let buf = property_data
+            .value
+            .as_ref()
+            .map(|d| payload::serialize_individual(d, None))
+            .unwrap_or(Ok(Vec::new()))
+            .map_err(MqttError::Payload)?;
+
+        self.send(
+            &property_data.interface,
+            &property_data.path,
+            QoS::ExactlyOnce,
+            buf,
+        )
+        .await
+        .map(drop)
+        .map_err(Error::Mqtt)
+    }
+
     async fn unset(&mut self, validated: ValidatedUnset) -> Result<(), Error> {
         // We send an empty vector as payload to unset the property, https://docs.astarte-platform.org/astarte/latest/080-mqtt-v1-protocol.html#payload-format
         self.send(

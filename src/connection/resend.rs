@@ -27,7 +27,7 @@ use crate::retention::memory::ItemValue;
 use crate::retention::{RetentionId, StoredRetention, StoredRetentionExt};
 use crate::state::SharedState;
 use crate::store::wrapper::StoreWrapper;
-use crate::store::StoreCapabilities;
+use crate::store::{PropertyStore, StoreCapabilities};
 use crate::transport::{Connection, Publish, Receive, Reconnect};
 use crate::Error;
 
@@ -90,6 +90,10 @@ where
         self.resend = Some(tokio::task::spawn(async move {
             let _interfaces = state.interfaces.read().await;
 
+            if let Err(err) = Self::send_device_properties(&mut store, &mut sender).await {
+                error!(error = %Report::new(&err), "error sending device properties");
+            }
+
             // We exit on errors so the connection task should exit with the error.
             if volatile {
                 if let Err(err) = Self::resend_volatile_publishes(&mut sender, &state).await {
@@ -101,6 +105,31 @@ where
                 error!(error = %Report::new(&err), "error sending stored retention");
             }
         }));
+    }
+
+    /// Sends the device owned properties even the null values.
+    /// This ignores the purge properties that should be sent by the connection implementation.
+    /// Since the purge properties we sent earlier could be.
+    async fn send_device_properties(
+        store: &mut StoreWrapper<C::Store>,
+        sender: &mut C::Sender,
+    ) -> Result<(), Error>
+    where
+        C::Sender: Publish,
+    {
+        let device_properties = store.device_props_with_unset().await?;
+
+        for prop in device_properties {
+            debug!(
+                "sending device-owned property = {}{}",
+                prop.interface, prop.path
+            );
+
+            // Don't wait for the ack since it's not fundamental for the connection
+            sender.resend_stored_property(prop).await?;
+        }
+
+        Ok(())
     }
 
     /// Check if there is a previous task for the resend of stored publishes and cancels it.
