@@ -24,12 +24,16 @@
 
 use std::sync::Arc;
 
+use astarte_interfaces::schema::Ownership;
 use astarte_interfaces::Properties;
 use astarte_interfaces::Schema;
 use astarte_message_hub_proto::tonic;
 use astarte_message_hub_proto::PropertyFilter;
 use tokio::sync::Mutex;
 
+use crate::error::DynError;
+use crate::store::error::StoreError;
+use crate::store::SqliteStore;
 use crate::{
     store::MissingCapability,
     store::{OptStoredProp, PropertyMapping, PropertyStore, StoreCapabilities, StoredProp},
@@ -44,14 +48,16 @@ use super::{
 // Store implementation designed specifically for the grpc connection
 /// Used mainly to request device owned properties to the message hub instead of looking them up in the local storage
 #[derive(Debug, Clone)]
-pub struct GrpcStore {
+pub struct GrpcStore<S> {
     pub(crate) client: Arc<Mutex<MsgHubClient>>,
+    pub(crate) inner: S,
 }
 
-impl GrpcStore {
-    pub(crate) fn new(client: MsgHubClient) -> Self {
+impl<S> GrpcStore<S> {
+    pub(crate) fn new(client: MsgHubClient, store: S) -> Self {
         Self {
             client: Arc::new(Mutex::new(client)),
+            inner: store,
         }
     }
 
@@ -72,6 +78,13 @@ impl GrpcStore {
     }
 }
 
+impl<S> GrpcStore<S>
+where
+    S: PropertyStore,
+{
+    async fn load_local_device_properties(&self) -> Result<Vec<StoredProp>, StoreError> {}
+}
+
 /// Error returned while operating on the store of a grpc connection
 /// This store needs to request properties from the message hub server
 /// and has additional errors consequently
@@ -84,6 +97,9 @@ pub enum GrpcStoreError {
     /// Error while converting a proto received value to an internal type
     #[error("Error while converting a proto received value to an internal type: {0}")]
     Conversion(#[from] MessageHubProtoError),
+    /// Error of the inner store
+    #[error("Inner store error")]
+    StoreError(#[from] StoreError),
 }
 
 impl From<tonic::Status> for GrpcStoreError {
@@ -92,26 +108,41 @@ impl From<tonic::Status> for GrpcStoreError {
     }
 }
 
-impl StoreCapabilities for GrpcStore {
-    type Retention = MissingCapability;
-    type Session = MissingCapability;
+impl<S> StoreCapabilities for GrpcStore<S>
+where
+    S: StoreCapabilities,
+{
+    type Retention = S::Retention;
+    type Session = S::Session;
 
     fn get_retention(&self) -> Option<&Self::Retention> {
-        None
+        self.inner.get_retention()
     }
 
     fn get_session(&self) -> Option<&Self::Session> {
-        None
+        self.inner.get_session()
     }
 }
 
 /// We implement the PropertyStore to override the behavior when retrieving or storing
 /// owned properties. Currently we do not store properties locally.
-impl PropertyStore for GrpcStore {
+impl<S> PropertyStore for GrpcStore<S>
+where
+    S: PropertyStore,
+{
     type Err = GrpcStoreError;
 
-    async fn store_prop(&self, _prop: StoredProp<&str, &AstarteData>) -> Result<(), Self::Err> {
-        // do not store properties locally when connected as a message hub node
+    async fn store_prop(&self, prop: StoredProp<&str, &AstarteData>) -> Result<(), Self::Err> {
+        // store only device properties
+        if prop.ownership == Ownership::Server {
+            return Ok(());
+        }
+
+        self.inner
+            .store_prop(prop)
+            .await
+            .map_err(StoreError::store)?;
+
         Ok(())
     }
 
@@ -119,41 +150,84 @@ impl PropertyStore for GrpcStore {
         &self,
         property: &PropertyMapping<'_>,
     ) -> Result<Option<AstarteData>, Self::Err> {
-        let property = self
-            .client
-            .lock()
-            .await
-            .get_property(astarte_message_hub_proto::PropertyIdentifier {
-                interface_name: property.interface_name().to_string(),
-                path: property.path().to_owned(),
-            })
-            .await
-            .map_err(GrpcStoreError::from)
-            .map(tonic::Response::into_inner)?;
+        if property.ownership() == Ownership::Server {
+            let property_res = self
+                .client
+                .lock()
+                .await
+                .get_property(astarte_message_hub_proto::PropertyIdentifier {
+                    interface_name: property.interface_name().to_string(),
+                    path: property.path().to_owned(),
+                })
+                .await
+                .map(tonic::Response::into_inner)
+                .map_err(GrpcStoreError::from);
 
-        property
-            .data
-            .map(|data| AstarteData::try_from(data).map_err(GrpcStoreError::from))
-            .transpose()
+            return property_res;
+
+            // match property_res {
+            //     Ok(prop) => return Ok(AstarteData::try_from(prop)?),
+            //     Err(e) => {
+            //         // NOTE if an error occurs we'll try to load a server property from the local store
+            //         // TODO probably we would still need to store server properties locally otherwise trying to return a server owned property would not make sense here
+            //         error!(err=%Report::new(e), "error while requesting server property, returning stored server property");
+            //     }
+            // }
+        }
+
+        self.inner
+            .load_prop(property)
+            .await
+            .map_err(StoreError::load)
     }
 
-    async fn unset_prop(&self, _property: &PropertyMapping<'_>) -> Result<(), Self::Err> {
-        // do not store properties locally when connected as a message hub node
+    async fn unset_prop(&self, prop: &PropertyMapping<'_>) -> Result<(), Self::Err> {
+        // store only device properties
+        if prop.ownership() == Ownership::Server {
+            return Ok(());
+        }
+
+        self.inner
+            .unset_prop(prop)
+            .await
+            .map_err(StoreError::unset)?;
+
         Ok(())
     }
 
-    async fn delete_prop(&self, _interface: &PropertyMapping<'_>) -> Result<(), Self::Err> {
-        // do not store properties locally when connected as a message hub node
+    async fn delete_prop(&self, prop: &PropertyMapping<'_>) -> Result<(), Self::Err> {
+        // store only device properties
+        if prop.ownership() == Ownership::Server {
+            return Ok(());
+        }
+
+        self.inner
+            .delete_prop(prop)
+            .await
+            .map_err(StoreError::delete)?;
+
         Ok(())
     }
 
     async fn clear(&self) -> Result<(), Self::Err> {
-        // the store is always empty
+        self.inner.clear().await.map_err(StoreError::clear)?;
+
         Ok(())
     }
 
     async fn load_all_props(&self) -> Result<Vec<StoredProp>, Self::Err> {
-        self.load_properties(None).await
+        let mut device_props = self
+            .inner
+            .device_props()
+            .await
+            .map_err(StoreError::device_props)?;
+        let server_props = self
+            .load_properties(Some(astarte_message_hub_proto::Ownership::Server))
+            .await?;
+
+        device_props.extend(server_props);
+
+        Ok(device_props)
     }
 
     async fn server_props(&self) -> Result<Vec<StoredProp>, Self::Err> {
@@ -162,31 +236,50 @@ impl PropertyStore for GrpcStore {
     }
 
     async fn device_props(&self) -> Result<Vec<StoredProp>, Self::Err> {
-        self.load_properties(Some(astarte_message_hub_proto::Ownership::Device))
+        self.inner
+            .device_props()
             .await
+            .map_err(|e| GrpcStoreError::from(StoreError::device_props(e)))
     }
 
     async fn interface_props(&self, interface: &Properties) -> Result<Vec<StoredProp>, Self::Err> {
-        self.client
-            .lock()
-            .await
-            .get_properties(astarte_message_hub_proto::InterfaceName {
-                name: interface.interface_name().to_string(),
-            })
-            .await
-            .map(tonic::Response::into_inner)
-            .map_err(GrpcStoreError::from)
-            .and_then(|p| Ok(convert::map_set_stored_properties(p)?))
+        if interface.ownership() == Ownership::Server {
+            self.client
+                .lock()
+                .await
+                .get_properties(astarte_message_hub_proto::InterfaceName {
+                    name: interface.interface_name().to_string(),
+                })
+                .await
+                .map(tonic::Response::into_inner)
+                .map_err(GrpcStoreError::from)
+                .and_then(|p| Ok(convert::map_set_stored_properties(p)?))
+        } else {
+            self.inner
+                .interface_props(interface)
+                .await
+                .map_err(|e| GrpcStoreError::from(StoreError::interface_props(e)))
+        }
     }
 
-    async fn delete_interface(&self, _interface: &Properties) -> Result<(), Self::Err> {
-        // do not store properties locally when connected as a message hub node
+    async fn delete_interface(&self, interface: &Properties) -> Result<(), Self::Err> {
+        if interface.ownership() == Ownership::Server {
+            return Ok(());
+        }
+
+        self.inner
+            .delete_interface(interface)
+            .await
+            .map_err(StoreError::delete_interface)?;
+
         Ok(())
     }
 
     async fn device_props_with_unset(&self) -> Result<Vec<OptStoredProp>, Self::Err> {
-        // unused for grpc connection
-        Ok(vec![])
+        self.inner
+            .device_props_with_unset()
+            .await
+            .map_err(|e| GrpcStoreError::from(StoreError::device_props(e)))
     }
 }
 
