@@ -24,7 +24,9 @@ use tracing::{debug, error, trace};
 use crate::builder::DEFAULT_CHANNEL_SIZE;
 use crate::error::Report;
 use crate::retention::memory::ItemValue;
-use crate::retention::{RetentionId, StoredRetention, StoredRetentionExt};
+use crate::retention::{
+    stored_mark_unsent, volatile_mark_unsent, RetentionId, StoredRetention, StoredRetentionExt,
+};
 use crate::state::SharedState;
 use crate::store::wrapper::StoreWrapper;
 use crate::store::{PropertyStore, StoreCapabilities};
@@ -90,10 +92,6 @@ where
         self.resend = Some(tokio::task::spawn(async move {
             let _interfaces = state.interfaces.read().await;
 
-            if let Err(err) = Self::send_device_properties(&mut store, &mut sender).await {
-                error!(error = %Report::new(&err), "error sending device properties");
-            }
-
             // We exit on errors so the connection task should exit with the error.
             if volatile {
                 if let Err(err) = Self::resend_volatile_publishes(&mut sender, &state).await {
@@ -103,6 +101,10 @@ where
 
             if let Err(err) = Self::resend_stored_publishes(&mut store, &mut sender).await {
                 error!(error = %Report::new(&err), "error sending stored retention");
+            }
+
+            if let Err(err) = Self::send_device_properties(&mut store, &mut sender).await {
+                error!(error = %Report::new(&err), "error sending device properties");
             }
         }));
     }
@@ -174,17 +176,23 @@ where
                 // mark as sent before so that no resend is tryed while in flight
                 state.volatile_store.mark_sent(&id, true).await;
 
-                match value {
+                let result = match value {
                     ItemValue::Individual(individual) => {
                         sender
                             .send_individual_stored(RetentionId::Volatile(id), individual)
-                            .await?;
+                            .await
                     }
                     ItemValue::Object(object) => {
                         sender
                             .send_object_stored(RetentionId::Volatile(id), object)
-                            .await?;
+                            .await
                     }
+                };
+
+                if let Err(e) = result {
+                    error!(error=%Report::new(&e), "error while sending volatile marking unsent");
+                    volatile_mark_unsent(&state.volatile_store, &id).await;
+                    return Err(e);
                 }
             }
 
@@ -223,7 +231,13 @@ where
                 // mark as sent before so that no resend is tryed while in flight
                 retention.update_sent_flag(&id, true).await?;
 
-                sender.resend_stored(RetentionId::Stored(id), info).await?;
+                let result = sender.resend_stored(RetentionId::Stored(id), info).await;
+
+                if let Err(e) = result {
+                    error!(error=%Report::new(&e), "error while sending stored marking unsent");
+                    stored_mark_unsent(store, &id).await;
+                    return Err(e);
+                }
             }
 
             if count == 0 || count < DEFAULT_CHANNEL_SIZE {

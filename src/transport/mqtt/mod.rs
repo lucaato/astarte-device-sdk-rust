@@ -68,7 +68,7 @@ use crate::{
     interfaces::{self, DeviceIntrospection, Interfaces, MappingRef},
     properties,
     retention::{
-        mark_unsent_on_err, memory::VolatileStore, PublishInfo, RetentionId, StoredRetention,
+        memory::VolatileStore, stored_mark_unsent, PublishInfo, RetentionId, StoredRetention,
     },
     session::{IntrospectionInterface, StoredSession},
     state::SharedState,
@@ -332,13 +332,9 @@ where
                 to_qos(validated.reliability),
                 buf,
             )
-            .await;
+            .await?;
 
-        if notice.is_err() {
-            mark_unsent_on_err(&self.store, &self.state.volatile_store, &id).await;
-        }
-
-        self.mark_sent(id, validated.reliability, notice?).await?;
+        self.mark_sent(id, validated.reliability, notice).await?;
 
         Ok(())
     }
@@ -363,13 +359,9 @@ where
                 to_qos(validated.reliability),
                 buf,
             )
-            .await;
+            .await?;
 
-        if notice.is_err() {
-            mark_unsent_on_err(&self.store, &self.state.volatile_store, &id).await;
-        }
-
-        self.mark_sent(id, validated.reliability, notice?).await?;
+        self.mark_sent(id, validated.reliability, notice).await?;
 
         Ok(())
     }
@@ -391,13 +383,9 @@ where
                 to_qos(data.reliability),
                 data.value.into(),
             )
-            .await;
+            .await?;
 
-        if notice.is_err() {
-            mark_unsent_on_err(&self.store, &self.state.volatile_store, &id).await;
-        }
-
-        self.mark_sent(id, data.reliability, notice?).await?;
+        self.mark_sent(id, data.reliability, notice).await?;
 
         Ok(())
     }

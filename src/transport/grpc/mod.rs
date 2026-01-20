@@ -58,7 +58,7 @@ use crate::builder::BuildConfig;
 use crate::client::RecvError;
 use crate::error::{AggregationError, InterfaceTypeError, Report};
 use crate::interfaces::MappingRef;
-use crate::retention::{mark_unsent_on_err, PublishInfo, RetentionId};
+use crate::retention::{PublishInfo, RetentionId};
 use crate::state::SharedState;
 use crate::store::OptStoredProp;
 use crate::{
@@ -237,13 +237,16 @@ where
     ) -> Result<(), crate::Error> {
         let value = AstarteMessage::from(data);
 
-        let send_res = self.client.send(tonic::Request::new(value)).await;
+        self.client
+            .send(tonic::Request::new(value))
+            .await
+            .map_err(GrpcError::from)?;
 
-        if let Err(e) = send_res {
-            mark_unsent_on_err(&self.store, &self.state.volatile_store, &id).await;
-            error!(err=%Report::new(e), "error while sending stored individual");
-            return Ok(());
-        }
+        // if let Err(e) = send_res {
+        //     mark_unsent_on_err(&self.store, &self.state.volatile_store, &id).await;
+        //     error!(err=%Report::new(e), "error while sending stored individual");
+        //     return Ok(());
+        // }
 
         self.mark_received(&id).await?;
 
@@ -257,13 +260,16 @@ where
     ) -> Result<(), crate::Error> {
         let value = AstarteMessage::from(data);
 
-        let send_res = self.client.send(tonic::Request::new(value)).await;
+        self.client
+            .send(tonic::Request::new(value))
+            .await
+            .map_err(GrpcError::from)?;
 
-        if let Err(e) = send_res {
-            mark_unsent_on_err(&self.store, &self.state.volatile_store, &id).await;
-            error!(err=%Report::new(e), "error while sending stored object");
-            return Ok(());
-        }
+        // if let Err(e) = send_res {
+        //     mark_unsent_on_err(&self.store, &self.state.volatile_store, &id).await;
+        //     error!(err=%Report::new(e), "error while sending stored object");
+        //     return Ok(());
+        // }
 
         self.mark_received(&id).await?;
 
@@ -277,13 +283,16 @@ where
     ) -> Result<(), crate::Error> {
         let msg = AstarteMessage::decode(data.value.borrow()).map_err(GrpcError::Decode)?;
 
-        let send_res = self.client.send(tonic::Request::new(msg)).await;
+        self.client
+            .send(tonic::Request::new(msg))
+            .await
+            .map_err(GrpcError::from)?;
 
-        if let Err(e) = send_res {
-            mark_unsent_on_err(&self.store, &self.state.volatile_store, &id).await;
-            error!(err=%Report::new(e), "error while resending stored publish");
-            return Ok(());
-        }
+        // if let Err(e) = send_res {
+        //     mark_unsent_on_err(&self.store, &self.state.volatile_store, &id).await;
+        //     error!(err=%Report::new(e), "error while resending stored publish");
+        //     return Ok(());
+        // }
 
         self.mark_received(&id).await?;
 
