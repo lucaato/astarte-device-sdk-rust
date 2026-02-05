@@ -21,7 +21,7 @@
 use std::{f64, time::Duration};
 
 use astarte_device_sdk::{
-    DeviceClient, DeviceConnection,
+    AstarteData, DeviceClient, DeviceConnection,
     aggregate::AstarteObject,
     builder::DeviceBuilder,
     client::RecvError,
@@ -42,16 +42,18 @@ const MESSAGE_HUB_URL: &str = "http://127.0.0.1:50051";
 /// Writable directory to store the persistent state of the device
 const STORE_DIRECTORY: &str = "./store-dir";
 
-const AGGREGATED_DEVICE: &str =
-    include_str!("../../docs/interfaces/org.astarte-platform.rust.get-started.Aggregated.json");
+const AGGREGATED_DEVICE: &str = include_str!(
+    "../retention/interfaces/org.astarte-platform.rust.examples.individual-datastream.VolatileDeviceObject.json"
+);
 const INDIVIDUAL_DEVICE: &str = include_str!(
     "../../docs/interfaces/org.astarte-platform.rust.get-started.IndividualDevice.json"
 );
 const INDIVIDUAL_SERVER: &str = include_str!(
     "../../docs/interfaces/org.astarte-platform.rust.get-started.IndividualServer.json"
 );
-const PROPERTY_DEVICE: &str =
-    include_str!("../../docs/interfaces/org.astarte-platform.rust.get-started.Property.json");
+const PROPERTY_DEVICE: &str = include_str!(
+    "../individual_properties/interfaces/org.astarte-platform.rust.examples.individual-properties.DeviceProperties.json"
+);
 
 const OBJECT_UNIQ_STORED: &str = include_str!(
     "../retention/interfaces/org.astarte-platform.rust.examples.individual-datastream.StoredUniqDeviceObject.json"
@@ -142,8 +144,8 @@ where
 /// Aggregated object
 #[derive(Debug, IntoAstarteObject)]
 struct AggregatedDevice {
-    double_endpoint: f64,
-    string_endpoint: String,
+    longinteger: i64,
+    boolean: bool,
 }
 
 /// Stored object datastream
@@ -168,7 +170,8 @@ where
     S: PropertyStore + StoreCapabilities,
 {
     // Every 2 seconds send the data
-    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut count = 0u32;
 
     loop {
         // Publish on the IndividualDevice
@@ -195,14 +198,14 @@ where
             .inspect_err(|e| error!(error = e.to_string(), "error while sending object"));
         // Publish on the Aggregaed
         let obj_data = AggregatedDevice {
-            double_endpoint: 42.0,
-            string_endpoint: "Sensor 1".to_string(),
+            longinteger: 1i64 << 32,
+            boolean: false,
         };
         // NOTE errors are inspected but not bubbled up to handle a sudden disconnection of the message hub
         let _ = client
             .send_object(
-                "org.astarte-platform.rust.get-started.Aggregated",
-                "/group_data",
+                "org.astarte-platform.rust.examples.individual-datastream.VolatileDeviceObject",
+                "/endpoint",
                 obj_data.try_into()?,
             )
             .await
@@ -211,13 +214,14 @@ where
         // NOTE errors are inspected but not bubbled up to handle a sudden disconnection of the message hub
         let _ = client
             .set_property(
-                "org.astarte-platform.rust.get-started.Property",
-                "/double_endpoint",
-                42.0.try_into()?,
+                "org.astarte-platform.rust.examples.individual-properties.DeviceProperties",
+                format!("/{count}/name").as_str(),
+                AstarteData::from("42"),
             )
             .await
             .inspect_err(|e| error!(error = e.to_string(), "error while setting property"));
 
+        count += 1;
         interval.tick().await;
     }
 }
