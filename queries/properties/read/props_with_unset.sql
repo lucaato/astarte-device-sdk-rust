@@ -4,7 +4,8 @@ SELECT
     value,
     type,
     interface_major,
-    ownership
+    ownership,
+    state
 FROM propcache
 WHERE
     ownership = ?

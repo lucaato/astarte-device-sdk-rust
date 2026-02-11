@@ -137,6 +137,13 @@ impl PropertyStore for GrpcStore {
             .transpose()
     }
 
+    async fn load_full_prop(
+        &self,
+        property: &DeviceMapping<'_, Properties>,
+    ) -> Result<StoredProp, Self::Err> {
+        todo!()
+    }
+
     async fn unset_prop(&self, _property: &PropertyMapping<'_>) -> Result<(), Self::Err> {
         // do not store properties locally when connected as a message hub node
         Ok(())

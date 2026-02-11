@@ -59,6 +59,8 @@ mock! {
             prop: StoredProp<&'a str, &'b AstarteData>,
         ) -> Result<(), StoreError>;
 
+        async fn update_sent<'a>(&self, prop: PropertyMapping<'a>, sent: bool) -> Result<(), Self::Err>;
+
         async fn load_prop<'a>(
             &self,
             property: &PropertyMapping<'a>,

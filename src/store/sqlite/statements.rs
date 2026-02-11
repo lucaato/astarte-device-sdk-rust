@@ -22,7 +22,7 @@ use tracing::{instrument, warn};
 
 use crate::{
     AstarteData,
-    store::{OptStoredProp, StoredProp},
+    store::{OptStoredProp, PropertyState, StoredProp, sqlite::RecordPropertyState},
 };
 
 use super::connection::{ReadConnection, WriteConnection};
@@ -63,6 +63,77 @@ impl WriteConnection {
             .map_err(SqliteError::Query)?;
 
         Ok(())
+    }
+
+    // this function inserts the stored prop or updates the stored one
+    // the update is not performed if
+    // - the state is not equal to [`assert_state`]
+    // - the value is the same
+    // in these cases the result will be `Ok(None)`
+    #[instrument(skip_all)]
+    pub(super) fn insert_changed(
+        &mut self,
+        prop: StoredProp<&str, &AstarteData>,
+        buf: &[u8],
+        state: PropertyState,
+        assert_state: PropertyState,
+    ) -> Result<Option<StoredRecord>, SqliteError> {
+        let mapping_type = into_stored_type(prop.value)?;
+        let ownership = RecordOwnership::from(prop.ownership);
+        let state = RecordPropertyState::from(state);
+        let assert_state = RecordPropertyState::from(assert_state);
+
+        let mut statement = self
+            .prepare_cached(include_query!(
+                "queries/properties/write/insert_ret_changed.sql"
+            ))
+            .map_err(SqliteError::Prepare)?;
+
+        let result = statement
+            .query_row(
+                (
+                    prop.interface,
+                    prop.path,
+                    buf,
+                    mapping_type,
+                    prop.interface_major,
+                    ownership,
+                    state,
+                    assert_state,
+                ),
+                |row| {
+                    Ok(StoredRecord {
+                        interface: row.get(0)?,
+                        path: row.get(1)?,
+                        value: row.get(2)?,
+                        stored_type: row.get(3)?,
+                        interface_major: row.get(4)?,
+                        ownership: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(SqliteError::Query)?;
+
+        Ok(result)
+    }
+
+    #[instrument(skip_all)]
+    pub(super) fn update_state(
+        &mut self,
+        interface: &str,
+        path: &str,
+        state: PropertyState,
+    ) -> Result<usize, SqliteError> {
+        let mut statement = self
+            .prepare_cached(include_query!("queries/properties/write/update_state.sql"))
+            .map_err(SqliteError::Prepare)?;
+
+        let result = statement
+            .execute((RecordPropertyState::from(state), interface, path))
+            .map_err(SqliteError::Query)?;
+
+        Ok(result)
     }
 
     pub(super) fn unset_prop(&self, interface: &str, path: &str) -> Result<(), SqliteError> {
@@ -138,6 +209,31 @@ impl ReadConnection {
             .map_err(SqliteError::Query)
     }
 
+    pub(super) fn load_full_prop(
+        &self,
+        interface: &str,
+        path: &str,
+    ) -> Result<Option<StoredRecord>, SqliteError> {
+        let mut statement = self
+            .prepare_cached(include_query!("queries/properties/read/load_full_prop.sql"))
+            .map_err(SqliteError::Prepare)?;
+
+        statement
+            .query_row((interface, path), |row| {
+                Ok(StoredRecord {
+                    interface: row.get(0)?,
+                    path: row.get(1)?,
+                    value: row.get(2)?,
+                    stored_type: row.get(3)?,
+                    interface_major: row.get(4)?,
+                    ownership: row.get(5)?,
+                    state: row.get(6)?,
+                })
+            })
+            .optional()
+            .map_err(SqliteError::Query)
+    }
+
     pub(super) fn load_all_props(&self) -> Result<Vec<StoredProp>, SqliteError> {
         let mut statement = self
             .prepare_cached(include_query!("queries/properties/read/load_all_props.sql"))
@@ -152,6 +248,7 @@ impl ReadConnection {
                     stored_type: row.get(3)?,
                     interface_major: row.get(4)?,
                     ownership: row.get(5)?,
+                    state: row.get(6)?,
                 })
             })
             .map_err(SqliteError::Query)?
@@ -186,6 +283,7 @@ impl ReadConnection {
                     stored_type: row.get(3)?,
                     interface_major: row.get(4)?,
                     ownership: row.get(5)?,
+                    state: row.get(6)?,
                 })
             })
             .map_err(SqliteError::Query)?
@@ -236,6 +334,7 @@ impl ReadConnection {
                     stored_type: row.get(3)?,
                     interface_major: row.get(4)?,
                     ownership: row.get(5)?,
+                    state: row.get(6)?,
                 })
             })
             .map_err(SqliteError::Query)?
@@ -269,6 +368,7 @@ impl ReadConnection {
                     stored_type: row.get(3)?,
                     interface_major: row.get(4)?,
                     ownership: row.get(5)?,
+                    state: row.get(6)?,
                 })
             })
             .map_err(SqliteError::Query)?

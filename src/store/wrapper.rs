@@ -22,7 +22,7 @@ use tracing::trace;
 
 use astarte_interfaces::Properties;
 
-use crate::types::AstarteData;
+use crate::{store::DeviceMapping, types::AstarteData};
 
 use super::{
     OptStoredProp, PropertyMapping, PropertyStore, StoreCapabilities, StoredProp, error::StoreError,
@@ -78,12 +78,45 @@ where
         self.store.store_prop(prop).await.map_err(StoreError::store)
     }
 
+    async fn update_state(
+        &self,
+        prop: &DeviceMapping<'_, Properties>,
+        state: super::PropertyState,
+    ) -> Result<(), Self::Err> {
+        self.store
+            .update_state(prop, state)
+            .await
+            .map_err(StoreError::update_sent)
+    }
+
+    async fn update_state_if_data_matches(
+        &self,
+        prop: &DeviceMapping<'_, Properties>,
+        state: super::PropertyState,
+        data: &AstarteData,
+    ) -> Result<usize, Self::Err> {
+        self.store
+            .update_state_if_data_matches(prop, state, data)
+            .await
+            .map_err(StoreError::update_sent)
+    }
+
     async fn load_prop(
         &self,
         property: &PropertyMapping<'_>,
     ) -> Result<Option<AstarteData>, Self::Err> {
         self.store
             .load_prop(property)
+            .await
+            .map_err(StoreError::load)
+    }
+
+    async fn insert_changed(
+        &self,
+        property: &DeviceMapping<'_, Properties>,
+    ) -> Result<Option<OptStoredProp>, Self::Err> {
+        self.store
+            .insert_changed(property)
             .await
             .map_err(StoreError::load)
     }

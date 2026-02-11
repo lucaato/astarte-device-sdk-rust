@@ -18,6 +18,7 @@
 
 //! Provides functionality for instantiating an Astarte sqlite database.
 
+use std::ops::Deref;
 use std::{
     collections::HashSet, error::Error as StdError, fmt::Debug, future::Future, num::NonZeroUsize,
 };
@@ -206,6 +207,39 @@ where
     }
 }
 
+pub(crate) struct DeviceMapping<'a, I>(MappingRef<'a, I>)
+where
+    I: astarte_interfaces::AggregationIndividual;
+
+impl<'a, I> DeviceMapping<'a, I>
+where
+    I: astarte_interfaces::AggregationIndividual,
+{
+    pub(crate) fn new(value: MappingRef<'a, I>) -> Option<Self> {
+        (value.interface().ownership() == Ownership::Device).then_some(DeviceMapping(value))
+    }
+}
+
+// impl<'a, I> From<MappingRef<'a, I>> for Option<DeviceMapping<'a, I>>
+// where
+//     I: astarte_interfaces::AggregationIndividual,
+// {
+//     fn from(value: MappingRef<'a, I>) -> Self {
+//         (value.interface().ownership() == Ownership::Device).then_some(DeviceMapping(value))
+//     }
+// }
+
+impl<'a, I> Deref for DeviceMapping<'a, I>
+where
+    I: astarte_interfaces::AggregationIndividual,
+{
+    type Target = MappingRef<'a, I>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Trait providing compatibility with Astarte devices to databases.
 ///
 /// Any database implementing this trait can be used as permanent storage for the properties
@@ -227,6 +261,25 @@ where
         &self,
         prop: StoredProp<&str, &AstarteData>,
     ) -> impl Future<Output = Result<(), Self::Err>> + Send;
+
+    fn insert_changed(
+        &self,
+        property: &DeviceMapping<'_, Properties>,
+    ) -> impl Future<Output = Result<Option<OptStoredProp>, Self::Err>> + Send;
+
+    /// Update sent flag of a property
+    fn update_state(
+        &self,
+        prop: &DeviceMapping<'_, Properties>,
+        state: PropertyState,
+    ) -> impl Future<Output = Result<(), Self::Err>> + Send;
+    /// Update sent flag of a property
+    fn update_state_if_data_matches(
+        &self,
+        prop: &DeviceMapping<'_, Properties>,
+        state: PropertyState,
+        data: &AstarteData,
+    ) -> impl Future<Output = Result<usize, Self::Err>> + Send;
     /// Load a property from the database.
     ///
     /// The property store should delete the property from the database if the major version of the
@@ -280,6 +333,16 @@ where
 /// yet, since they where not sent to Astarte.
 pub type OptStoredProp = StoredProp<String, Option<AstarteData>>;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub enum PropertyState {
+    // Property changed but not sent
+    Changed,
+    // Property being sent to the server
+    Pending,
+    // Property updated
+    Completed,
+}
+
 /// Data structure used to return stored properties by a database implementing the [`PropertyStore`]
 /// trait.
 #[derive(Debug, Clone, Copy, PartialOrd)]
@@ -300,6 +363,8 @@ pub struct StoredProp<S = String, V = AstarteData> {
     /// If it's [`Ownership::Device`] the property was sent from the device to Astarte. Instead, if
     /// it's [`Ownership::Server`] it was received from Astarte.
     pub ownership: Ownership,
+    /// State of the property
+    pub state: PropertyState,
 }
 
 impl StoredProp {
@@ -321,6 +386,7 @@ impl<'a> StoredProp<&'a str, &'a AstarteData> {
             value,
             interface_major: mapping.interface().version_major(),
             ownership: mapping.interface().ownership(),
+            state: PropertyState::Changed,
         }
     }
 }
@@ -333,6 +399,7 @@ impl<'a> From<StoredProp<&'a str, &'a AstarteData>> for StoredProp {
             value: value.value.clone(),
             interface_major: value.interface_major,
             ownership: value.ownership,
+            state: value.state,
         }
     }
 }
@@ -345,6 +412,7 @@ impl<'a> From<&'a StoredProp> for StoredProp<&'a str, &'a AstarteData> {
             value: &value.value,
             interface_major: value.interface_major,
             ownership: value.ownership,
+            state: value.state,
         }
     }
 }
@@ -388,6 +456,7 @@ mod tests {
             value: &ty,
             interface_major: 1,
             ownership: Ownership::Device,
+            state: PropertyState::Changed,
         };
         let property_mapping = PropertyMapping::from(&prop);
 
@@ -430,6 +499,7 @@ mod tests {
                 value: None,
                 interface_major: 1,
                 ownership: Ownership::Device,
+                state: PropertyState::Changed,
             }],
             store
                 .device_props_with_unset(1, 0)
@@ -464,6 +534,7 @@ mod tests {
             value: ty.clone(),
             interface_major: 1,
             ownership: Ownership::Device,
+            state: PropertyState::Changed,
         };
         let server_prop_interface = Properties::from_str(E2E_SERVER_PROPERTY).unwrap();
         let server_prop = StoredProp {
@@ -472,6 +543,7 @@ mod tests {
             value: ty.clone(),
             interface_major: 1,
             ownership: Ownership::Server,
+            state: PropertyState::Changed,
         };
 
         store.store_prop(device_prop.as_prop_ref()).await.unwrap();

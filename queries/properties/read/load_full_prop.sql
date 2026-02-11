@@ -1,4 +1,4 @@
-INSERT OR REPLACE INTO propcache (
+SELECT
     interface,
     path,
     value,
@@ -6,4 +6,8 @@ INSERT OR REPLACE INTO propcache (
     interface_major,
     ownership,
     state
-) VALUES (?, ?, ?, ?, ?, ?, ?);
+FROM propcache
+WHERE
+    interface = ?
+    AND path = ?;
+

@@ -18,13 +18,18 @@
 
 //! Handles the sending of properties
 
+use std::ops::Deref;
+
 use astarte_interfaces::schema::Ownership;
 use astarte_interfaces::{InterfaceMapping, MappingPath, Properties, Schema};
 use tracing::{debug, error, trace};
 
+use crate::error::OwnershipError;
 use crate::interfaces::MappingRef;
 use crate::state::ConnStatus;
-use crate::store::{PropertyMapping, PropertyStore, StoredProp};
+use crate::store::{
+    DeviceMapping, OptStoredProp, PropertyMapping, PropertyState, PropertyStore, StoredProp,
+};
 use crate::transport::Connection;
 use crate::validate::{ValidatedProperty, ValidatedUnset};
 use crate::{AstarteData, Error};
@@ -49,39 +54,65 @@ where
 
         let validated = ValidatedProperty::validate(mapping, data)?;
 
+        let device_mapping = DeviceMapping::new(mapping).unwrap();
+
         trace!("sending individual type {}", validated.data.display_type());
 
-        if self.is_prop_stored(&mapping, &validated).await? {
-            debug!("property was already sent, no need to send it again");
-            return Ok(());
+        let stored = self.try_load_full_prop(&device_mapping).await?;
+
+        if let Some(stored_prop) = stored {
+            if stored_prop
+                .value
+                .as_ref()
+                .is_some_and(|val| val == &validated.data)
+            {
+                debug!("property was already sent, no need to send it again");
+                return Ok(());
+            }
+
+            self.store
+                .update_state(&device_mapping, PropertyState::Changed)
+                .await?;
+        } else {
+            let prop = StoredProp {
+                interface: validated.interface.as_ref(),
+                path: validated.path.as_ref(),
+                value: &validated.data,
+                interface_major: mapping.interface().version_major(),
+                ownership: Ownership::Device,
+                state: PropertyState::Pending,
+            };
+
+            self.store.store_prop(prop).await?;
         }
-
-        let prop = StoredProp {
-            interface: validated.interface.as_str(),
-            path: validated.path.as_str(),
-            value: &validated.data,
-            interface_major: mapping.interface().version_major(),
-            ownership: Ownership::Device,
-        };
-
-        self.store.store_prop(prop).await?;
-
-        debug!(
-            "property sent {interface_name}{path}:{}",
-            mapping.interface().version_major()
-        );
 
         match self.state.connection().await {
             ConnStatus::Connected => {
-                self.sender.send_property(validated).await?;
+                let send_result = self.sender.send_property(validated).await;
 
-                trace!(
-                    "property sent {interface_name}{path}:{}",
-                    mapping.interface().version_major()
-                );
+                if let Err(e) = send_result {
+                    error!("error while sending property through transport {e:?}");
+
+                    self.store
+                        .update_state(&device_mapping, PropertyState::Changed)
+                        .await?;
+                } else {
+                    trace!(
+                        "property sent {interface_name}{path}:{}",
+                        mapping.interface().version_major()
+                    );
+
+                    self.store
+                        .update_state(&device_mapping, PropertyState::Pending)
+                        .await?;
+                }
             }
             ConnStatus::Disconnected => {
-                trace!("property not sent since offline")
+                trace!("property not sent since offline");
+
+                self.store
+                    .update_state(&device_mapping, PropertyState::Changed)
+                    .await?;
             }
             ConnStatus::Closed => {
                 return Err(Error::Disconnected);
@@ -91,17 +122,39 @@ where
         Ok(())
     }
 
-    /// Checks whether a passed interface is a property and if it is already stored with the same value.
-    /// Useful to prevent sending a property twice with the same value.
-    async fn is_prop_stored(
+    /// Get a property or deletes it if a version or type miss-match happens.
+    pub(crate) async fn try_load_changed(
         &self,
-        mapping: &MappingRef<'_, Properties>,
-        new: &ValidatedProperty,
-    ) -> Result<bool, Error> {
-        // Check if this property is already in db
-        let stored = self.try_load_prop(mapping).await?;
+        device_mapping: &DeviceMapping<'_, Properties>,
+    ) -> Result<Option<OptStoredProp>, Error> {
+        let property_mapping = device_mapping.mapping();
 
-        Ok(stored.is_some_and(|val| val == new.data))
+        let value = self.store.insert_changed(&device_mapping).await?;
+
+        let value = match value {
+            Some(prop)
+                if !prop
+                    .value
+                    .as_ref()
+                    .is_some_and(|v| v.eq_mapping_type(property_mapping.mapping_type())) =>
+            {
+                error!(
+                    ?prop,
+                    "stored property type mismatch, expected {}",
+                    property_mapping.mapping_type(),
+                );
+
+                self.store
+                    .delete_prop(&PropertyMapping::from(device_mapping.deref()))
+                    .await?;
+
+                None
+            }
+            Some(value) => Some(value),
+            None => None,
+        };
+
+        Ok(value)
     }
 
     /// Get a property or deletes it if a version or type miss-match happens.

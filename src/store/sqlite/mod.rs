@@ -42,6 +42,7 @@ use self::pool::Connections;
 use self::{connection::SqliteConnection, options::SqliteOptions};
 use super::{OptStoredProp, PropertyMapping, PropertyStore, StoreCapabilities, StoredProp};
 use crate::{
+    store::{DeviceMapping, PropertyState},
     transport::mqtt::payload::{Payload, PayloadError},
     types::{AstarteData, TypeError, de::BsonConverter},
 };
@@ -328,6 +329,60 @@ impl Debug for PropRecord {
     }
 }
 
+/// Error when converting a u8 into the [`PropertyState`] struct.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid property state value {value}")]
+pub struct PropertyStateError {
+    value: u8,
+}
+
+#[derive(Debug, Copy, Clone)]
+#[repr(u8)]
+enum RecordPropertyState {
+    Changed = 0,
+    Pending = 1,
+    Completed = 2,
+}
+
+impl From<PropertyState> for RecordPropertyState {
+    fn from(value: PropertyState) -> Self {
+        match value {
+            PropertyState::Changed => Self::Changed,
+            PropertyState::Pending => Self::Pending,
+            PropertyState::Completed => Self::Completed,
+        }
+    }
+}
+
+impl From<RecordPropertyState> for PropertyState {
+    fn from(value: RecordPropertyState) -> Self {
+        match value {
+            RecordPropertyState::Changed => Self::Changed,
+            RecordPropertyState::Pending => Self::Pending,
+            RecordPropertyState::Completed => Self::Completed,
+        }
+    }
+}
+
+impl ToSql for RecordPropertyState {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok((*self as u8).into())
+    }
+}
+
+impl FromSql for RecordPropertyState {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        let value = u8::column_result(value)?;
+
+        match value {
+            0 => Ok(RecordPropertyState::Changed),
+            1 => Ok(RecordPropertyState::Pending),
+            2 => Ok(RecordPropertyState::Completed),
+            _ => Err(FromSqlError::Other(OwnershipError { value }.into())),
+        }
+    }
+}
+
 /// Result of the load_all_props query
 #[derive(Debug, Clone)]
 struct StoredRecord {
@@ -353,6 +408,7 @@ impl StoredRecord {
             value,
             interface_major: self.interface_major,
             ownership: self.ownership.into(),
+            state: self.state.into(),
         }))
     }
 }
@@ -372,6 +428,7 @@ impl TryFrom<StoredRecord> for OptStoredProp {
             value,
             interface_major: record.interface_major,
             ownership: record.ownership.into(),
+            state: record.state.into(),
         })
     }
 }
@@ -505,6 +562,7 @@ impl SqliteStore {
             include_query!("migrations/0001_init.sql"),
             include_query!("migrations/0002_unset_property.sql"),
             include_query!("migrations/0003_session.sql"),
+            include_query!("migrations/0004_sent_properties.sql"),
         ];
         const USER_VERSION: u32 = {
             assert!(MIGRATIONS.len() < (u32::MAX as usize));
@@ -609,6 +667,39 @@ impl PropertyStore for SqliteStore {
             .await?;
 
         Ok(())
+    }
+
+    async fn update_state(
+        &self,
+        prop: &DeviceMapping<'_, Properties>,
+        state: PropertyState,
+    ) -> Result<(), Self::Err> {
+        self.pool
+            .acquire_writer(move |writer| writer.store_prop((&prop).into(), &buf))
+            .await?;
+
+        Ok(())
+    }
+
+    async fn insert_changed(
+        &self,
+        property: &DeviceMapping<'_, Properties>,
+        prop: StoredProp<&str, &AstarteData>,
+    ) -> Result<Option<OptStoredProp>, Self::Err> {
+        let interface_name = property.interface().interface_name().to_string();
+        let path = property.path().to_string();
+
+        let Some(record) = self
+            .pool
+            .acquire_writer(move |writer| writer.insert_changed(&interface_name, &path))
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let stored_prop = OptStoredProp::try_from(record)?;
+
+        Ok(Some(stored_prop))
     }
 
     async fn load_prop(

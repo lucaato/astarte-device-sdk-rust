@@ -23,10 +23,10 @@ use std::{collections::HashMap, fmt::Display, sync::Arc};
 use astarte_interfaces::schema::Ownership;
 use astarte_interfaces::{Properties, Schema};
 use tokio::sync::RwLock;
-use tracing::error;
+use tracing::{error, warn};
 
 use super::{OptStoredProp, PropertyMapping, PropertyStore, StoreCapabilities, StoredProp};
-use crate::store::MissingCapability;
+use crate::store::{DeviceMapping, MissingCapability};
 use crate::types::AstarteData;
 
 /// Error from the memory store.
@@ -78,6 +78,7 @@ impl PropertyStore for MemoryStore {
             value,
             interface_major,
             ownership,
+            state,
         }: StoredProp<&str, &AstarteData>,
     ) -> Result<(), Self::Err> {
         let key = Key::new(interface, path);
@@ -85,6 +86,7 @@ impl PropertyStore for MemoryStore {
             value: Some(value.clone()),
             interface_major,
             ownership,
+            sent,
         };
 
         let mut store = self.store.write().await;
@@ -92,6 +94,46 @@ impl PropertyStore for MemoryStore {
         store.insert(key, value);
 
         Ok(())
+    }
+
+    async fn update_sent(&self, prop: PropertyMapping<'_>, sent: bool) -> Result<(), Self::Err> {
+        let key = Key::new(prop.interface_name(), prop.path());
+
+        let mut store = self.store.write().await;
+        let opt_val = store.get_mut(&key);
+
+        match opt_val {
+            Some(value) if value.interface_major != prop.version_major() => {
+                error!(
+                    "Version mismatch for property {}{} (stored {}, interface {}). Deleting.",
+                    prop.interface_name(),
+                    prop.path(),
+                    value.interface_major,
+                    prop.version_major()
+                );
+
+                store.remove(&key);
+            }
+            Some(value) => {
+                value.sent = sent;
+            }
+            None => {
+                warn!(
+                    "Updating non existing property {}{}",
+                    prop.interface_name(),
+                    prop.version_major()
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn insert_changed(
+        &self,
+        property: &DeviceMapping<'_, Properties>,
+    ) -> Result<StoredProp, Self::Err> {
+        todo!()
     }
 
     async fn load_prop(
@@ -268,6 +310,7 @@ struct Value {
     value: Option<AstarteData>,
     interface_major: i32,
     ownership: Ownership,
+    sent: bool,
 }
 
 impl Value {
@@ -278,6 +321,7 @@ impl Value {
             value: value.clone(),
             interface_major: self.interface_major,
             ownership: self.ownership,
+            sent: self.sent,
         })
     }
 }
@@ -290,6 +334,7 @@ impl From<(&Key, &Value)> for OptStoredProp {
             value: value.value.clone(),
             interface_major: value.interface_major,
             ownership: value.ownership,
+            sent: value.sent,
         }
     }
 }

@@ -54,6 +54,9 @@ pub enum StoreError {
     /// Could not delete all the interface properties.
     #[error("could not delete all the interface properties")]
     DeleteInterface(#[source] DynError),
+    /// Could not update property sent flag.
+    #[error("could not update property sent flag")]
+    UpdateSent(#[source] DynError),
 }
 
 impl StoreError {
@@ -95,5 +98,9 @@ impl StoreError {
 
     pub(crate) fn delete_interface(err: impl Into<DynError>) -> Self {
         Self::DeleteInterface(err.into())
+    }
+
+    pub(crate) fn update_sent(err: impl Into<DynError>) -> Self {
+        Self::UpdateSent(err.into())
     }
 }
