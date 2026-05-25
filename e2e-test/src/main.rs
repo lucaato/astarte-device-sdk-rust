@@ -66,7 +66,7 @@ async fn main() -> eyre::Result<()> {
     let config = match cli.command {
         Command::Run(run) => Config::new(cli.url, run),
         Command::Healthy { wait: true } => {
-            let tls: rustls::ClientConfig = crate::tls::client_config()?;
+            let tls: rustls::ClientConfig = astarte_device_sdk_tls::config()?;
             let client = reqwest::Client::builder()
                 .use_preconfigured_tls(tls)
                 .build()?;
@@ -81,7 +81,7 @@ async fn main() -> eyre::Result<()> {
             return Ok(());
         }
         Command::Healthy { wait: false } => {
-            let tls = crate::tls::client_config()?;
+            let tls = astarte_device_sdk_tls::config()?;
 
             let client = reqwest::Client::builder()
                 .use_preconfigured_tls(tls)

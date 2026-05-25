@@ -187,6 +187,7 @@ version = "0.13.0"
 dependencies = [
  "astarte-device-fdo",
  "astarte-device-sdk-derive",
+ "astarte-device-sdk-tls",
  "astarte-interfaces",
  "astarte-message-hub-proto",
  "astarte-message-hub-proto-mock",
@@ -217,7 +218,6 @@ dependencies = [
  "rumqttc-dev-patched",
  "rusqlite",
  "rustls",
- "rustls-native-certs",
  "rustls-pemfile",
  "rustls-platform-verifier 0.6.2",
  "rustls-webpki 0.103.13",
@@ -254,6 +254,18 @@ dependencies = [
  "astarte-device-sdk",
  "chrono",
  "mockall",
+]
+
+[[package]]
+name = "astarte-device-sdk-tls"
+version = "0.13.0"
+dependencies = [
+ "cfg-if",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-platform-verifier 0.6.2",
+ "tracing",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1021,6 +1033,7 @@ name = "e2e-test"
 version = "0.13.0"
 dependencies = [
  "astarte-device-sdk",
+ "astarte-device-sdk-tls",
  "async-channel",
  "base64",
  "chrono",

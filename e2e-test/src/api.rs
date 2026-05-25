@@ -81,7 +81,7 @@ impl ApiClient {
         value.set_sensitive(true);
         let headers = HeaderMap::from_iter([(http::header::AUTHORIZATION, value)]);
 
-        let tls: rustls::ClientConfig = crate::tls::client_config()?;
+        let tls: rustls::ClientConfig = astarte_device_sdk_tls::config()?;
         let client = ClientBuilder::new()
             .default_headers(headers)
             .use_preconfigured_tls(tls)

@@ -98,7 +98,7 @@ impl Channel {
 
         let uri = Uri::try_from(appengine_ws.to_string())?;
 
-        let tls: rustls::ClientConfig = crate::tls::client_config()?;
+        let tls: rustls::ClientConfig = astarte_device_sdk_tls::config()?;
         let tls = Arc::new(tls);
         let client = phoenix_chan::Client::builder(uri)?
             .tls_config(tls)

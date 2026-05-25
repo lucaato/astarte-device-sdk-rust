@@ -21,6 +21,7 @@ resolver = "3"
 members = [
   "astarte-device-sdk-derive",
   "astarte-device-sdk-mock",
+  "astarte-device-sdk-tls",
   "e2e-test",
 ]
 
@@ -106,6 +107,7 @@ required-features = ["derive"]
 [dependencies]
 astarte-device-fdo = { workspace = true, optional = true }
 astarte-device-sdk-derive = { workspace = true, optional = true }
+astarte-device-sdk-tls = { workspace = true }
 astarte-interfaces = { workspace = true }
 astarte-message-hub-proto = { workspace = true, optional = true }
 async-channel.workspace = true
@@ -136,7 +138,6 @@ reqwest = { workspace = true, default-features = false, features = [
 ] }
 rumqttc = { workspace = true, features = ["use-rustls"] }
 rustls.workspace = true
-rustls-native-certs.workspace = true
 rustls-pemfile.workspace = true
 # Required by rumqttc even if not used
 rustls-webpki = { workspace = true, default-features = false, features = [
@@ -199,6 +200,7 @@ rustdoc-args = ["--cfg=astarte_device_sdk_docsrs"]
 astarte-device-fdo = "1.0.1"
 astarte-device-sdk = { path = "./", version = "=0.13.0" }
 astarte-device-sdk-derive = { version = "=0.13.0", path = "./astarte-device-sdk-derive" }
+astarte-device-sdk-tls = { version = "=0.13.0", path = "./astarte-device-sdk-tls"  }
 astarte-interfaces = "0.1.1"
 astarte-message-hub-proto = "0.10.1"
 astarte-message-hub-proto-mock = "0.10.1"
