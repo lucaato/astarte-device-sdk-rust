@@ -43,6 +43,14 @@ macro_rules! check_astype_match {
     };
 }
 
+macro_rules! into_astype {
+    ( $self:ident, {$( $variant:tt ,)*}) => {
+        match $self {
+            $(AstarteData::$variant(_) => ::astarte_interfaces::schema::MappingType::$variant,)*
+        }
+    };
+}
+
 // we implement From<T> and PartialEq<T> from all the base types to AstarteData, using this macro
 macro_rules! impl_type_conversion_traits {
     ( {$( ($typ:ty, $variant:tt) ,)*}) => {
@@ -186,6 +194,27 @@ pub enum AstarteData {
     ///
     /// UTC date time.
     DateTimeArray(Vec<Timestamp>),
+}
+
+impl From<&AstarteData> for astarte_interfaces::schema::MappingType {
+    fn from(value: &AstarteData) -> Self {
+        into_astype!(value, {
+            Double,
+            Integer,
+            Boolean,
+            LongInteger,
+            String,
+            BinaryBlob,
+            DateTime,
+            DoubleArray,
+            IntegerArray,
+            BooleanArray,
+            LongIntegerArray,
+            StringArray,
+            BinaryBlobArray,
+            DateTimeArray,
+        })
+    }
 }
 
 impl AstarteData {

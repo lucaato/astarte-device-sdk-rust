@@ -40,7 +40,7 @@ pub struct DeviceEvent {
     pub data: Value,
 }
 
-/// Conversion error from an [`DeviceEvent].
+/// Conversion error from an [`DeviceEvent`].
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum FromEventError {

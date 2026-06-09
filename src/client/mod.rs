@@ -340,6 +340,14 @@ pub trait Client: Clone {
     /// An event can only be received once, so if the client is cloned only one of the clients
     /// instances will receive the message.
     fn recv(&self) -> impl Future<Output = Result<DeviceEvent, RecvError>> + Send;
+
+    /// Receives an event from Astarte and blocks until one event is received.
+    ///
+    /// # Note
+    ///
+    /// An event can only be received once, so if the client is cloned only one of the clients
+    /// instances will receive the message.
+    fn recv_blocking(&self) -> Result<DeviceEvent, RecvError>;
 }
 
 /// Connection of the Client.
@@ -655,6 +663,12 @@ where
         self.events
             .recv()
             .await
+            .map_err(|_| RecvError::Disconnected)?
+    }
+
+    fn recv_blocking(&self) -> Result<DeviceEvent, RecvError> {
+        self.events
+            .recv_blocking()
             .map_err(|_| RecvError::Disconnected)?
     }
 }

@@ -42,6 +42,18 @@ pub(crate) struct MqttRetention {
     rx: RetReceiver,
 }
 
+impl std::fmt::Debug for MqttRetention {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MqttRetention")
+            .field(
+                "packets",
+                &format!("[ ... ({} stored packets) ]", self.packets.len()),
+            )
+            .field("rx", &self.rx)
+            .finish()
+    }
+}
+
 impl MqttRetention {
     pub(crate) fn new(rx: RetReceiver) -> Self {
         Self {

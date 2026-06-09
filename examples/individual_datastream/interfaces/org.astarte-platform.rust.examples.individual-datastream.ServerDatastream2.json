@@ -1,5 +1,5 @@
 {
-    "interface_name": "org.astarte-platform.rust.examples.individual-datastream.ServerDatastream2",
+    "interface_name": "org.astarte-platform.rust.examples.individual-datastream.ServerDatastreamNoTimestamp",
     "version_major": 0,
     "version_minor": 1,
     "type": "datastream",

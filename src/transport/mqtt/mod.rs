@@ -624,6 +624,7 @@ where
 ///
 ///  It manages the interaction with the MQTT broker, handling connections, subscriptions, and
 ///  message publishing following the Astarte protocol.
+#[derive(Debug)]
 pub struct Mqtt<S, P> {
     pub(crate) connection: MqttState<P>,
     pub(crate) client_sender: Arc<OnceLock<ClientSender>>,
