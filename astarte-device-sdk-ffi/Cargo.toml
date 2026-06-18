@@ -1,0 +1,26 @@
+[package]
+name = "astarte-device-sdk-ffi"
+version.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+name = "astarte_device"
+
+[dependencies]
+astarte-device-sdk.workspace = true
+tokio = { workspace = true, features = [
+  # "rt",
+  "rt-multi-thread",
+  # "signal",
+  # "test-util"
+] }
+eyre.workspace = true
+url.workspace = true
+tracing.workspace = true
+diplomat.workspace = true
+diplomat-runtime.workspace = true

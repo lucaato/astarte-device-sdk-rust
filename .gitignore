@@ -17,3 +17,10 @@ tarpaulin-report.html
 
 # Configuration directories
 .helix
+
+# meson
+/builddir
+
+/subprojects/*
+
+!/subprojects/*.wrap

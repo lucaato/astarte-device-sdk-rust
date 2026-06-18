@@ -21,6 +21,7 @@ resolver = "3"
 members = [
   "astarte-device-sdk-derive",
   "astarte-device-sdk-mock",
+  "astarte-device-sdk-ffi",
   "astarte-device-tls",
   "astarte-test-utils",
   "e2e-test",
@@ -215,6 +216,8 @@ chrono = "0.4.34"
 clap = "4.5.32"
 color-eyre = "0.6.3"
 darling = "0.23.0"
+diplomat = "0.15.0"
+diplomat-runtime = "0.15.0"
 eyre = "0.6.12"
 flate2 = "1.0.0"
 futures = "0.3.0"
