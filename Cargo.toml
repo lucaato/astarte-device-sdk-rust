@@ -20,6 +20,7 @@
 resolver = "3"
 members = [
   "astarte-device-sdk-derive",
+  # "astarte-device-sdk-ffi",
   "astarte-device-sdk-mock",
   "astarte-device-tls",
   "astarte-test-utils",

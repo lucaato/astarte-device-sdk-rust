@@ -249,6 +249,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "astarte-device-sdk-ffi"
+version = "0.13.0"
+dependencies = [
+ "astarte-device-sdk",
+ "boltffi",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "astarte-device-sdk-mock"
 version = "0.13.0"
 dependencies = [
@@ -579,6 +590,89 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "boltffi"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fe5c41986763c4ca0a606132b8faced9c9a921919e74a3463cfda30dc8b5b93"
+dependencies = [
+ "boltffi_core",
+ "boltffi_macros",
+]
+
+[[package]]
+name = "boltffi_ast"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fb2c526a3a5a1a9db3d816077a18940f38146ce2d44750abdff0b165a37d00b"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "boltffi_binding"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c611e35868d4730ce235c2fe2560cced55af731a6c5cc0c3c2c09752482edb18"
+dependencies = [
+ "boltffi_ast",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "boltffi_core"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5131aaefaa5dca171d0604d717bbbd153ba5ceea12cbd12e34812b370c0793bf"
+dependencies = [
+ "boltffi_macros",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "boltffi_ffi_rules"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a33158515e92c5656073f76bbf18d3d63bad48e9a264e02b644726cfa04039b0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "syn",
+ "walkdir",
+]
+
+[[package]]
+name = "boltffi_macros"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "590a53f1ad78ca03f60f99cc2948f01bfbb73dca694867b6abbfe5af7a5dae54"
+dependencies = [
+ "boltffi_ast",
+ "boltffi_binding",
+ "boltffi_ffi_rules",
+ "boltffi_scan",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "boltffi_scan"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b5886823140348d58a3650bf0cf46560511281e5d7ad50488f55ebef5902daa"
+dependencies = [
+ "boltffi_ast",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn",
+ "walkdir",
 ]
 
 [[package]]

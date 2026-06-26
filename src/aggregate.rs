@@ -50,6 +50,16 @@ pub struct AstarteObject {
     pub(crate) inner: Vec<(String, AstarteData)>,
 }
 
+impl IntoIterator for AstarteObject {
+    type Item = (String, AstarteData);
+
+    type IntoIter = <Vec<(String, AstarteData)> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
 impl AstarteObject {
     /// Returns an empty object.
     pub fn new() -> Self {

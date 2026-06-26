@@ -6,6 +6,8 @@
 
 /target
 /astarte-device-sdk-derive/target
+/astarte-device-sdk-ffi/target
+/astarte-device-sdk-ffi/dist
 
 # Databases used for the examples
 astarte-example-db.*
