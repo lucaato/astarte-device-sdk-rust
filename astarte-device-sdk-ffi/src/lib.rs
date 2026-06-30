@@ -1,79 +1,263 @@
 use std::{
-    ffi::{CStr, CString, c_char, c_void},
-    mem::ManuallyDrop,
-    str::FromStr,
-    thread::{self, JoinHandle},
-    time::Duration,
+    ffi::{CString, NulError, c_char, c_void},
+    ptr::NonNull,
 };
 
-use tokio::sync::{mpsc, oneshot};
-use tracing::warn;
-use typeshare::typeshare;
-use url::Url;
+use ffi_convert::{CDrop, CReprOf};
 
-use astarte_device_sdk::{
-    AstarteData, Client, DeviceEvent, Error as AstarteError, EventLoop, Value,
-    builder::DeviceBuilder,
-    chrono::Utc,
-    client::ClientConnection,
-    store::memory::MemoryStore,
-    transport::mqtt::{Credential, MqttArgs, MqttConfig},
+use crate::{
+    config::NativeDeviceConfig,
+    device::{DeviceHandle, NativeDeviceHandle},
 };
+
+pub mod config;
+pub mod device;
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy)]
+pub struct UserData(*mut c_void);
+unsafe impl Send for UserData {}
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorString(*const c_char);
+unsafe impl Send for ErrorString {}
+
+#[derive(Debug, Clone)]
+pub enum StringResult<T> {
+    Ok(T),
+    Err(CString),
+}
+
+#[repr(C)]
+pub enum NativeResult<T> {
+    Ok(T),
+    Err(ErrorString),
+}
+
+/// Borrows an ffi compatible struct from the input, the borrowed data does not have to be a reference
+/// This is useful for example when calling callbacks,
+/// in this case we know that the data needs to be cloned inside the callback>
+/// We want to borrow the data in a C compatible way and then continue
+/// in the rust side with the full ownership of the data.
+pub trait BorrowCRepr<T> {
+    fn borrow_raw(input: &T) -> Self;
+}
+
+pub trait BorrowAsRust<T> {
+    fn unsafe_borrow_as_rust<'a>(input: NonNull<Self>) -> &'a T;
+}
+
+// impl<T, U> BorrowCRepr<Result<T, CString>> for NativeResult<U>
+// where
+//     U: BorrowCRepr<T>,
+// {
+//     fn borrow_raw(input: &Result<T, CString>) -> Self {
+//         input
+//     }
+// }
+
+impl<T> CDrop for NativeResult<T>
+where
+    T: CDrop,
+{
+    fn do_drop(&mut self) -> Result<(), ffi_convert::CDropError> {
+        match self {
+            NativeResult::Ok(o) => o.do_drop(),
+            NativeResult::Err(_e) => {
+                // NOTE the error string is still owned by rust we don't need to drop it
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<T, U> CReprOf<StringResult<T>> for NativeResult<U>
+where
+    U: CReprOf<T>,
+{
+    fn c_repr_of(input: StringResult<T>) -> Result<Self, ffi_convert::CReprOfError> {
+        let res = match input {
+            StringResult::Ok(o) => NativeResult::Ok(U::c_repr_of(o)?),
+            StringResult::Err(e) => {
+                let strptr = e.as_c_str().as_ptr();
+
+                NativeResult::Err(ErrorString(strptr))
+            }
+        };
+
+        Ok(res)
+    }
+}
+
+// returns a owned rust struct that can be borrowed with BorrowCRepr
+// this allows the caller to still have atuomatic drop of the resource
+// but at the same time it can use BorrowCRepr::borrow to get a reference
+// this is useful when calling c callbacks
+trait CCompatibleType<T>: Sized {
+    fn as_c_compat(input: T) -> Result<Self, NulError>;
+}
+
+impl CCompatibleType<bool> for bool {
+    fn as_c_compat(input: bool) -> Result<Self, NulError> {
+        Ok(input)
+    }
+}
+
+impl CCompatibleType<String> for CString {
+    fn as_c_compat(input: String) -> Result<Self, NulError> {
+        CString::new(input)
+    }
+}
+
+impl<T, U> CCompatibleType<eyre::Result<T>> for StringResult<U>
+where
+    U: CCompatibleType<T>,
+{
+    fn as_c_compat(input: eyre::Result<T>) -> Result<Self, NulError> {
+        let ok = match input {
+            Ok(o) => Self::Ok(U::as_c_compat(o)?),
+            Err(e) => {
+                let owned = CString::new(e.to_string())?;
+
+                Self::Err(owned)
+            }
+        };
+
+        Ok(ok)
+    }
+}
+
+impl BorrowCRepr<bool> for bool {
+    fn borrow_raw(input: &bool) -> Self {
+        *input
+    }
+}
+
+impl<T, U> BorrowCRepr<StringResult<T>> for NativeResult<U>
+where
+    U: BorrowCRepr<T>,
+{
+    fn borrow_raw(input: &StringResult<T>) -> Self {
+        match input {
+            StringResult::Ok(t) => Self::Ok(U::borrow_raw(t)),
+            StringResult::Err(cstring) => {
+                let str = cstring.as_c_str();
+                let ptr = str.as_ptr();
+
+                Self::Err(ErrorString(ptr))
+            }
+        }
+    }
+}
+
+// impl From<Result<T, E>> for NativeResult<T>
+// where
+//     E: std::error::Error,
+// {
+//     fn from(value: Result<T, E>) -> Self {
+//         match value {
+//             Ok(v) => Self::Ok(v),
+//             Err(e) => Self::Err(e.to_string()),
+//         }
+//     }
+// }
+
+pub type DeviceHandleConnectCallback =
+    extern "C" fn(result: *const NativeResult<NativeDeviceHandle>, user_data: UserData);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn device_handle_connect(
+    config: NativeDeviceConfig,
+    connect_cbk: DeviceHandleConnectCallback,
+    connect_user_data: UserData,
+    loop_cbk: DeviceHandleLoopCallback,
+    loop_user_data: UserData,
+) {
+    let result = DeviceHandle::connect(
+        config,
+        connect_cbk,
+        connect_user_data,
+        loop_cbk,
+        loop_user_data,
+    );
+
+    result.unwrap();
+}
+
+pub type DeviceHandleLoopCallback =
+    extern "C" fn(result: *const NativeResult<bool>, user_data: UserData);
+
+// blocking function that waits for the device and runtime to stop
+// WARN this invalidates the device_handle pointer, it's only safe to use when we know the wrapper object won't be accessed no more
+// #[unsafe(no_mangle)]
+// pub extern "C" fn device_handle_stop(handle: NativeDeviceHandle) {
+//     let result = DeviceHandle::disconnect(handle.as_rust().unwrap());
+
+//     if let Err(error) = result {
+//         error!(%error, "error when disconnecting device");
+//     }
+// }
+
+// WARN this consumes the device so the pointer won't be usable afterward
+// call this only when the target language won't ever use this again like
+// when the garbage collector is cleaning up the object
+// #[unsafe(no_mangle)]
+// pub extern "C" fn device_client_stop(
+//     device_handle: NativeDeviceHandle,
+//     callback: DeviceHandleDisconnectCallback,
+//     user_data: UserData,
+// ) {
+//     let boxed_device = device_handle.as_rust().unwrap();
+
+//     boxed_device
+//         .tx
+//         .blocking_send(DeviceCommand::Disconnect(DisconnectCommand::new(callback, user_data))
+//         .unwrap();
+
+//     // change this to a callback
+//     let res = rx.blocking_recv().unwrap();
+
+//     println!("rust: {res:?}");
+
+//     boxed_device.runtime_thread.join().unwrap();
+
+//     println!("rust: thread joined");
+// }
 
 // Define callback types for future use
 // pub type AstarteDeviceConnectionCallback = extern "C" fn(user_data: *mut c_void);
 // pub type AstarteDeviceDisconnectionCallback = extern "C" fn(user_data: *mut c_void);
-pub type AstarteDeviceReceiveCallback = extern "C" fn(
-    interface: *const core::ffi::c_char,
-    path: *const core::ffi::c_char,
-    value: *const CValue,
-    user_data: *mut c_void,
-);
 
-pub type AstarteDeviceSendCallback = extern "C" fn(
-    // TODO add nullable timestamp
-    // : *mut c_void,
-    user_data: *mut c_void,
-);
+// #[derive(Debug)]
+// pub struct NativeDeviceHandle {
+//     tx: mpsc::Sender<InternalDeviceCommand>,
+//     runtime_thread: JoinHandle<()>,
+// }
 
-struct UnsafeUserData(*mut c_void);
-unsafe impl Send for UnsafeUserData {}
-
-enum InternalDeviceCommand {
-    SendValue {
-        interface: String,
-        path: String,
-        value: Value,
-        callback: AstarteDeviceSendCallback,
-        user_data: UnsafeUserData,
-    },
-    PollElement {
-        callback: AstarteDeviceReceiveCallback,
-        user_data: UnsafeUserData,
-    },
-    Disconnect {
-        tx: oneshot::Sender<Result<(), AstarteError>>,
-    },
-}
-
-#[derive(Debug)]
-pub struct CDeviceHandle {
-    tx: mpsc::Sender<InternalDeviceCommand>,
-    runtime_thread: JoinHandle<()>,
-}
-
+/*
 #[repr(C)]
-#[typeshare]
-pub struct CAstarteDeviceConfig {
-    pub device_id: *const core::ffi::c_char,
+#[derive(Debug, Clone)]
+pub enum AstarteDataFfi {
+    Double(f64),
+    Integer(i32),
+    Boolean(bool),
+    LongInteger(i64),
+    String(*const c_char),
+    BinaryBlob(u8 *),
+    DateTime(i64),
+    DoubleArray(Vec<f64>),
+    IntegerArray(Vec<i32>),
+    BooleanArray(Vec<bool>),
+    LongIntegerArray(Vec<i64>),
+    StringArray(* *const c_char),
+    BinaryBlobArray(Vec<Vec<u8>>),
+    DateTimeArray(Vec<i64>),
+}
 
-    pub cred_secr: *const core::ffi::c_char,
-
-    pub realm: *const core::ffi::c_char,
-
-    pub pairing_url: *const core::ffi::c_char,
-
-    pub interfaces_dir: *const core::ffi::c_char,
+#[unsafe(no_mangle)]
+pub extern "C" fn device_test_data_ffi(value: AstarteDataFfi) -> u32 {
+    0
 }
 
 #[repr(C)]
@@ -320,7 +504,7 @@ pub extern "C" fn device_client_receive(
         .tx
         .blocking_send(InternalDeviceCommand::PollElement {
             callback,
-            user_data: UnsafeUserData(user_data),
+            user_data: UserData(user_data),
         })
         .unwrap();
     println!("rust: poll element sent");
@@ -329,8 +513,8 @@ pub extern "C" fn device_client_receive(
 #[unsafe(no_mangle)]
 pub extern "C" fn device_client_send_individual(
     device_handle: *mut CDeviceHandle,
-    interface_name: *const core::ffi::c_char,
-    path: *const core::ffi::c_char,
+    interface_name: *const c_char,
+    path: *const c_char,
     data: *mut CAstarteData,
     callback: AstarteDeviceSendCallback,
     user_data: *mut c_void,
@@ -358,7 +542,7 @@ pub extern "C" fn device_client_send_individual(
                 timestamp: Utc::now(),
             },
             callback,
-            user_data: UnsafeUserData(user_data),
+            user_data: UserData(user_data),
         })
         .unwrap();
 
@@ -491,3 +675,4 @@ pub unsafe extern "C" fn device_event_value_get_integer(
         false
     }
 }
+*/

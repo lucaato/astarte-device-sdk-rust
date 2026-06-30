@@ -20,6 +20,9 @@ tokio = { workspace = true, features = [
   # "signal",
   # "test-util"
 ] }
+eyre.workspace = true
+ffi-convert.workspace = true
+ffi-convert-derive.workspace = true
 url.workspace = true
 tracing.workspace = true
-typeshare.workspace = true
+# typeshare.workspace = true
