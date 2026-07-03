@@ -90,16 +90,10 @@ pub struct DeviceHandle {
 
 impl DeviceHandle {
     // blocking function call to create device handle
-    pub fn connect(
-        // config: NativeDeviceConfig,
-        // connect_cbk: DeviceHandleConnectCallback,
-        // connect_user_data: UserData,
-        // loop_cbk: DeviceHandleLoopCallback,
-        // loop_user_data: UserData,
-        config: DeviceConfig,
-    ) -> eyre::Result<Box<DeviceHandle>> {
-        // let config = config.as_rust()?;
-
+    pub fn connect<F>(config: DeviceConfig, handle_events_res: F) -> eyre::Result<Box<DeviceHandle>>
+    where
+        F: Fn(Result<(), astarte_device_sdk::Error>) + Send + Sync + 'static,
+    {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -108,18 +102,15 @@ impl DeviceHandle {
             let (client, connection) = Self::mk_device(config).await?;
 
             let loop_handle = tokio::spawn(async move {
-                let result = connection
-                    .handle_events()
-                    .await
-                    // NOTE dummy type to not have a zst
-                    .map(|_| true)
-                    .wrap_err("error in device handle_events");
+                let result = connection.handle_events().await;
 
-                let native_res = StringResult::<bool>::as_c_compat(result).unwrap();
+                handle_events_res(result);
 
-                tokio::task::spawn_blocking(move || {
-                    loop_cbk(&NativeResult::borrow_raw(&native_res), loop_user_data);
-                });
+                // let native_res = StringResult::<bool>::as_c_compat(result).unwrap();
+
+                // tokio::task::spawn_blocking(move || {
+                //     loop_cbk(&NativeResult::borrow_raw(&native_res), loop_user_data);
+                // });
             });
 
             Ok((loop_handle, client))
