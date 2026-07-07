@@ -152,13 +152,13 @@ async fn main() -> eyre::Result<()> {
     let mut tasks = JoinSet::<eyre::Result<()>>::new();
 
     // Create a task to transmit
-    if let Some(c) = loop_times {
-        let client = client.clone();
-        tasks.spawn(send_loop(client, 0..c.get()));
-    } else {
-        let client = client.clone();
-        tasks.spawn(send_loop(client, 0u32..));
-    }
+    // if let Some(c) = loop_times {
+    //     let client = client.clone();
+    //     tasks.spawn(send_loop(client, 0..c.get()));
+    // } else {
+    //     let client = client.clone();
+    //     tasks.spawn(send_loop(client, 0u32..));
+    // }
 
     // Spawn a task to receive
     tasks.spawn({
@@ -208,32 +208,36 @@ async fn main() -> eyre::Result<()> {
 
     tasks.spawn(async move { tokio::signal::ctrl_c().await.map_err(Into::into) });
 
-    if let Some(timeout) = transmission_timeout {
-        let out = futures::future::select(
-            Box::pin(tasks.join_next()),
-            Box::pin(tokio::time::sleep(timeout)),
-        )
-        .await;
+    tokio::spawn(async { tasks.join_all().await });
 
-        match out {
-            Either::Left((o, _)) => info!(o = ?o, "Task exited"),
-            Either::Right(_) => info!("Reached timeout"),
-        }
-    } else {
-        while let Some(res) = tasks.join_next().await {
-            match res {
-                Ok(res) => {
-                    res?;
-                    break;
-                }
-                Err(err) if err.is_cancelled() => {}
-                Err(err) => return Err(err.into()),
-            }
-        }
-    }
+    client.disconnect().await.unwrap();
 
-    client.disconnect().await?;
-    tasks.shutdown().await;
+    // if let Some(timeout) = transmission_timeout {
+    //     let out = futures::future::select(
+    //         Box::pin(tasks.join_next()),
+    //         Box::pin(tokio::time::sleep(timeout)),
+    //     )
+    //     .await;
+
+    //     match out {
+    //         Either::Left((o, _)) => info!(o = ?o, "Task exited"),
+    //         Either::Right(_) => info!("Reached timeout"),
+    //     }
+    // } else {
+    //     while let Some(res) = tasks.join_next().await {
+    //         match res {
+    //             Ok(res) => {
+    //                 res?;
+    //                 break;
+    //             }
+    //             Err(err) if err.is_cancelled() => {}
+    //             Err(err) => return Err(err.into()),
+    //         }
+    //     }
+    // }
+
+    // client.disconnect().await?;
+    // tasks.shutdown().await;
 
     Ok(())
 }

@@ -17,7 +17,7 @@ typedef struct OpaqueDeviceHadle {
 
 typedef struct OpaqueDeviceHadle *NativeDeviceHandle;
 
-typedef const char *ErrorString;
+typedef const char *StaticString;
 
 typedef enum NativeResult_NativeDeviceHandle_Tag {
   Ok_NativeDeviceHandle,
@@ -31,7 +31,7 @@ typedef struct NativeResult_NativeDeviceHandle {
       NativeDeviceHandle ok;
     };
     struct {
-      ErrorString err;
+      StaticString err;
     };
   };
 } NativeResult_NativeDeviceHandle;
@@ -53,15 +53,22 @@ typedef struct NativeResult_bool {
       bool ok;
     };
     struct {
-      ErrorString err;
+      StaticString err;
     };
   };
 } NativeResult_bool;
 
 typedef void (*DeviceHandleLoopCallback)(const struct NativeResult_bool *result, UserData user_data);
 
+typedef void (*DeviceHandleDisconnectCallback)(const struct NativeResult_bool *result,
+                                               UserData user_data);
+
 void device_handle_connect(struct NativeDeviceConfig config,
                            DeviceHandleConnectCallback connect_cbk,
                            UserData connect_user_data,
                            DeviceHandleLoopCallback loop_cbk,
                            UserData loop_user_data);
+
+void device_handle_disconnect(NativeDeviceHandle handle,
+                              DeviceHandleDisconnectCallback disconnect_cbk,
+                              UserData user_data);

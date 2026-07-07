@@ -106,16 +106,29 @@ class Device:
         device_handle_config.interfaces_dir = interfaces_dir
 
         loop = asyncio.get_running_loop()
-        # connect future
-        connect_future = loop.create_future()
-        connect_cbk_data = device.ffi_handle(ConnectFutureData(connect_future, device))
         # handle events future
         loop_future = loop.create_future()
         loop_cbk_data = device.ffi_handle(HandleEventsFutureData(loop_future, device))
+        # connect future
+        connect_future = loop.create_future()
+        connect_cbk_data = device.ffi_handle(ConnectFutureData(connect_future, device, loop_future, loop_cbk_data))
 
         _get_lib().device_handle_connect(device_handle_config[0], connect_cbk, connect_cbk_data, loop_cbk, loop_cbk_data)
 
         return (connect_future, loop_future)
+
+    def disconnect(self) -> asyncio.Future[None]:
+        loop = asyncio.get_running_loop()
+
+        future = loop.create_future()
+        user_data = self.ffi_handle(DisconnectFutureData(future, self))
+
+        # FIXME the disconnect could now fail if the rwlock is locked whe should loop
+        # a few times until it succeeds
+        _get_lib().device_handle_disconnect(self._ptr, disconnect_cbk, user_data)
+
+        return future
+        
         
     # def receive_data(self) -> asyncio.Future[EventData]:
     #     loop = asyncio.get_running_loop()
@@ -131,18 +144,43 @@ class Device:
 
     #     return future
 
-    def __del__(self):
-        print("destructorrr")
+class InvalidNativeValueError(Exception):
+    pass
 
-class ConnectFutureData:
-    def __init__(self, future: asyncio.Future[Device], device: DeviceHandle):
+class DisconnectFutureData:
+    def __init__(self, future: asyncio.Future[None], device: DeviceHandle):
         self.future = future
         self.device = device
 
-class ConnectError(Exception):
+class DisconnectError(Exception):
     pass
 
-class InvalidNativeValueError(Exception):
+@ffi.callback("void(const struct NativeResult_bool *, UserData)")
+def disconnect_cbk(native_res, user_data):
+    data: DisconnectFutureData = Device.from_ffi_handle(user_data)
+    
+    if native_res.tag == _get_lib().Ok_bool:
+        data.future.get_loop().call_soon_threadsafe(data.future.set_result, None)
+    elif native_res.tag == _get_lib().Err_bool:
+        error_str = ffi.string(native_res.err, 1024)
+        loop_error = DisconnectError(error_str)
+        data.future.get_loop().call_soon_threadsafe(data.future.set_exception, loop_error)
+    else:
+        # FIXME don't know if raising is a good idea in a callback
+        raise InvalidNativeValueError()
+        
+
+class ConnectFutureData:
+    def __init__(self, future: asyncio.Future[Device], device: DeviceHandle, loop_future: asyncio.Future[None], loop_user_data: DeviceHandle):
+        self.future = future
+        self.device = device
+        self.loop_user_data = loop_user_data
+
+    def fail_loop_future(self, error: Exception):
+        data: HandleEventsFutureData = Device.from_ffi_handle(self.loop_user_data)
+        data.future.get_loop().call_soon_threadsafe(data.future.set_exception, error)
+
+class ConnectError(Exception):
     pass
 
 @ffi.callback("void(const struct NativeResult_NativeDeviceHandle *, UserData)")
@@ -158,10 +196,18 @@ def connect_cbk(native_result, user_data):
         error_str = ffi.string(native_result.err, 1024)
         connect_error = ConnectError(error_str)
 
+        # NOTE if the connect fail we force a fail in the loop callback too
+        data.fail_loop_future(connect_error)
         data.future.get_loop().call_soon_threadsafe(data.future.set_exception, connect_error)
     else:
+        err = InvalidNativeValueError()
+
+        # NOTE if the connect fail we force a fail in the loop callback too
+        data.fail_loop_future(err)
+        data.future.get_loop().call_soon_threadsafe(data.future.set_exception, err)
+
         # FIXME don't know if raising is a good idea in a callback
-        raise InvalidNativeValueError()
+        raise err
 
 
 class HandleEventsFutureData:
@@ -213,10 +259,15 @@ async def main():
 
     asyncio.create_task(wait_handle_events(handle_events_future))
 
-    await asyncio.sleep(10)
+    print(device)
+
+    await asyncio.sleep(5)
 
     print("stopping device...", flush=True)
-    # device.stop()
+
+    await device.disconnect()
+
+    print("stopped device", flush=True)
     
 
 if __name__ == "__main__":

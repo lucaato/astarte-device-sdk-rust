@@ -1,6 +1,6 @@
 use std::ffi::c_char;
 
-use ffi_convert::{AsRust, CDrop, CReprOf};
+use ffi_convert::AsRust;
 
 pub struct DeviceConfig {
     pub device_id: String,
@@ -20,3 +20,4 @@ pub struct NativeDeviceConfig {
     pub pairing_url: *const c_char,
     pub interfaces_dir: *const c_char,
 }
+unsafe impl Send for NativeDeviceConfig {}

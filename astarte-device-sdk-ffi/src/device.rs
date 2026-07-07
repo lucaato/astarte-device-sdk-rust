@@ -1,19 +1,30 @@
-use std::{mem, ptr::NonNull, str::FromStr, thread};
+use std::{
+    ffi::NulError,
+    mem,
+    ptr::NonNull,
+    str::FromStr,
+    sync::{RwLock, RwLockReadGuard},
+    thread,
+};
 
 use astarte_device_sdk::{
-    EventLoop,
+    Client, EventLoop,
     builder::DeviceBuilder,
     client::ClientConnection,
     pairing::api::PairingApi,
     store::memory::MemoryStore,
-    transport::mqtt::{Credential, Mqtt, MqttArgs, MqttConfig},
+    transport::{
+        Connection,
+        mqtt::{Credential, Mqtt, MqttArgs, MqttConfig},
+    },
 };
-use eyre::Context;
-use ffi_convert::{AsRust, CDrop, CReprOf};
+use eyre::{Context, OptionExt, bail, eyre};
+use ffi_convert::{AsRust, CDrop, CReprOf, UnexpectedNullPointerError};
 use tokio::{
     runtime::Runtime,
     task::{self, JoinHandle},
 };
+use tracing::{error, info};
 use url::Url;
 
 use crate::{
@@ -31,6 +42,13 @@ pub struct OpaqueDeviceHadle {
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy)]
 pub struct NativeDeviceHandle(*mut OpaqueDeviceHadle);
+unsafe impl Send for NativeDeviceHandle {}
+
+impl NativeDeviceHandle {
+    pub fn new(opaque: *mut OpaqueDeviceHadle) -> Self {
+        Self(opaque)
+    }
+}
 
 impl CCompatibleType<NativeDeviceHandle> for NativeDeviceHandle {
     fn as_c_compat(input: NativeDeviceHandle) -> Result<Self, std::ffi::NulError> {
@@ -68,11 +86,11 @@ impl CReprOf<Box<DeviceHandle>> for NativeDeviceHandle {
 // }
 
 impl BorrowAsRust<DeviceHandle> for NativeDeviceHandle {
-    fn unsafe_borrow_as_rust<'a>(input: NonNull<Self>) -> &'a DeviceHandle {
-        let this: &NativeDeviceHandle = unsafe { input.as_ref() };
-        let concrete: &'a DeviceHandle = unsafe { mem::transmute(this.0) };
+    fn borrow_as_rust<'a>(self) -> Result<&'a DeviceHandle, UnexpectedNullPointerError> {
+        let ptr = NonNull::new(self.0);
+        let ptr: NonNull<DeviceHandle> = unsafe { mem::transmute(ptr) };
 
-        concrete
+        Ok(unsafe { ptr.as_ref() })
     }
 }
 
@@ -82,67 +100,80 @@ impl BorrowCRepr<NativeDeviceHandle> for NativeDeviceHandle {
     }
 }
 
-pub struct DeviceHandle {
+struct InnerDeviceData {
     rt: Runtime,
     client: astarte_device_sdk::client::DeviceClient<Mqtt<MemoryStore, PairingApi>>,
     loop_handle: task::JoinHandle<()>,
 }
 
+pub struct DeviceHandle {
+    inner: RwLock<Option<InnerDeviceData>>,
+}
+
 impl DeviceHandle {
+    fn new(
+        rt: Runtime,
+        client: astarte_device_sdk::client::DeviceClient<Mqtt<MemoryStore, PairingApi>>,
+        loop_handle: task::JoinHandle<()>,
+    ) -> Self {
+        let inner = InnerDeviceData {
+            rt,
+            client,
+            loop_handle,
+        };
+
+        Self {
+            inner: RwLock::new(Some(inner)),
+        }
+    }
+
     // blocking function call to create device handle
-    pub fn connect<F>(config: DeviceConfig, handle_events_res: F) -> eyre::Result<Box<DeviceHandle>>
+    pub fn connect<F>(config: NativeDeviceConfig, loop_end: F) -> eyre::Result<Box<DeviceHandle>>
     where
-        F: Fn(Result<(), astarte_device_sdk::Error>) + Send + Sync + 'static,
+        F: FnOnce(Result<(), astarte_device_sdk::Error>) + Send + 'static,
     {
+        let config = config.as_rust()?;
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
 
-        let mk_client_handle = rt.spawn(async move {
+        let result: eyre::Result<_> = rt.block_on(async move {
             let (client, connection) = Self::mk_device(config).await?;
 
-            let loop_handle = tokio::spawn(async move {
-                let result = connection.handle_events().await;
-
-                handle_events_res(result);
-
-                // let native_res = StringResult::<bool>::as_c_compat(result).unwrap();
-
-                // tokio::task::spawn_blocking(move || {
-                //     loop_cbk(&NativeResult::borrow_raw(&native_res), loop_user_data);
-                // });
-            });
+            let loop_handle = Self::spawn_eventloop(connection, loop_end);
 
             Ok((loop_handle, client))
         });
 
-        let (loop_handle, client) = rt.block_on(mk_client_handle)??;
-        let device_handle = Box::new(DeviceHandle {
-            rt,
-            client,
-            loop_handle,
-        });
+        let (loop_handle, client) = result?;
 
-        // {
-        //     Ok() => Box::new(DeviceHandle {
-        //         rt,
-        //         client,
-        //         loop_handle,
-        //     }),
-        //     Err(e) => {
-        //         let result = StringResult::<NativeDeviceHandle>::as_c_compat(Err(e)).unwrap();
-        //         connect_cbk(&NativeResult::borrow_raw(&result), connect_user_data);
-        //         return;
-        //     }
-        // };
-
-        // let native_device = NativeDeviceHandle::c_repr_of(device_handle).unwrap();
-
-        // let result = StringResult::<NativeDeviceHandle>::as_c_compat(Ok(native_device)).unwrap();
-
-        // connect_cbk(&NativeResult::borrow_raw(&result), connect_user_data);
+        let device_handle = Box::new(Self::new(rt, client, loop_handle));
 
         Ok(device_handle)
+    }
+
+    fn spawn_eventloop<C, F>(connection: C, loop_end: F) -> JoinHandle<()>
+    where
+        C: EventLoop + Send + 'static,
+        F: FnOnce(Result<(), astarte_device_sdk::Error>) + Send + 'static,
+    {
+        // tokio::task::spawn_blocking(move || {
+        //     let rt = tokio::runtime::Handle::current();
+
+        //     let result = rt
+        //         .block_on(connection.handle_events())
+        //         .inspect_err(|error| error!(%error, "help plz"));
+
+        //     loop_end(result);
+        // })
+        tokio::spawn(async move {
+            let result = connection.handle_events().await;
+
+            tokio::task::block_in_place(move || {
+                loop_end(result);
+            });
+        })
     }
 
     async fn mk_device(
@@ -174,6 +205,28 @@ impl DeviceHandle {
 
         Ok((client, connection))
     }
+
+    fn inner_ref(&self) -> eyre::Result<RwLockReadGuard<'_, Option<InnerDeviceData>>> {
+        let Ok(read) = self.inner.try_read() else {
+            bail!("can't take write lock, already locked somewhere, retry");
+        };
+
+        Ok(read)
+    }
+
+    pub fn send<F>(handle: NativeDeviceHandle, sent: F, data: ())
+    where
+        F: FnOnce(Result<(), astarte_device_sdk::Error>) + Send + 'static,
+    {
+        let handle = handle.borrow_as_rust().wrap_err("can't borrow device")?;
+
+        let inner = handle.inner_ref()?;
+        let inner = inner.as_ref().ok_or(eyre!("already disconnected"))?;
+    }
+
+    // fn send_data(handle: NativeDeviceHandle) {
+    //     let handle = handle.borrow_as_rust().wrap_err("can't borrow device")?;
+    // }
 
     // fn handle_poll_command(
     //     poll_command: PollCommand,
@@ -220,77 +273,119 @@ impl DeviceHandle {
     //     });
     // }
     //
-    async fn stop(
-        // NOTE since we have no check that allows this function to be called only once we should
-        mut client: impl ClientConnection + Clone,
-        device_handle: JoinHandle<()>,
-    ) -> eyre::Result<()> {
-        client.disconnect().await?;
 
-        device_handle.await?;
+    fn into_inner(handle: NativeDeviceHandle) -> eyre::Result<InnerDeviceData> {
+        let handle = handle.borrow_as_rust().wrap_err("can't borrow device")?;
 
-        Ok(())
+        let Ok(mut write) = handle.inner.try_write() else {
+            bail!("can't take write lock, already locked somewhere, retry");
+        };
+
+        write.take().ok_or_eyre("already disconnected")
     }
 
-    // pub fn disconnect(self: Box<Self>) -> eyre::Result<()> {
-    //     let Self {
-    //         rt,
-    //         client,
-    //         device_handle,
-    //     } = *self;
+    // blocving disconnect function
+    pub fn disconnect(handle: NativeDeviceHandle) -> eyre::Result<()> {
+        let inner = Self::into_inner(handle)?;
 
-    //     rt.block_on(async move { Self::stop(client, device_handle).await })?;
+        let InnerDeviceData {
+            rt,
+            mut client,
+            loop_handle,
+        } = inner;
 
-    //     rt.shutdown_background();
+        // info!("spawning disconnect task");
+        // rt.spawn_blocking(move || {
+        //     let rt = tokio::runtime::Handle::current();
 
-    //     Ok(())
-    // }
-}
+        //     let result = rt.block_on(async move {
+        //         info!("disconnecting");
 
-pub type DeviceHandleReceiveCallback =
-    extern "C" fn(event: StringResult<ReceiveEvent>, user_data: UserData);
+        //         client
+        //             .disconnect()
+        //             .await
+        //             .wrap_err("cannot disconnect client")?;
 
-pub type DeviceHandleSendCallback = extern "C" fn(result: StringResult<()>, user_data: UserData);
+        //         info!("disconnected");
 
-pub type DeviceHandleDisconnectCallback =
-    extern "C" fn(result: StringResult<()>, user_data: UserData);
+        //         loop_handle.await.wrap_err("error while joining task")?;
 
-pub struct SendValueCommand {
-    interface: String,
-    path: String,
-    value: SendData,
-    callback: DeviceHandleSendCallback,
-    user_data: UserData,
-}
+        //         info!("joined loop");
 
-pub struct PollCommand {
-    callback: DeviceHandleReceiveCallback,
-    user_data: UserData,
-}
+        //         Ok(())
+        //     });
 
-pub struct DisconnectCommand {
-    callback: DeviceHandleDisconnectCallback,
-    user_data: UserData,
-}
+        //     disconnect_cbk(result);
+        // });
 
-impl DisconnectCommand {
-    pub fn new(callback: DeviceHandleDisconnectCallback, user_data: UserData) -> Self {
-        Self {
-            callback,
-            user_data,
-        }
+        let result = rt.block_on(async move {
+            info!("disconnecting");
+
+            client
+                .disconnect()
+                .await
+                .wrap_err("cannot disconnect client")?;
+
+            info!("disconnected");
+
+            loop_handle.await.wrap_err("error while joining task")?;
+
+            info!("joined loop");
+
+            Ok(())
+        });
+
+        info!("shutting down runtime");
+        rt.shutdown_background();
+
+        result
     }
 }
 
-pub enum DeviceCommand {
-    SendValue(SendValueCommand),
-    Poll(PollCommand),
-    Disconnect(DisconnectCommand),
-}
+// pub type DeviceHandleReceiveCallback =
+//     extern "C" fn(event: StringResult<ReceiveEvent>, user_data: UserData);
 
-pub struct ReceiveEvent {
-    data: (),
-}
-pub struct SendData {
-    data: (),
-}
+// pub type DeviceHandleSendCallback = extern "C" fn(result: StringResult<()>, user_data: UserData);
+
+// pub type DeviceHandleDisconnectCallback =
+//     extern "C" fn(result: StringResult<()>, user_data: UserData);
+
+// pub struct SendValueCommand {
+//     interface: String,
+//     path: String,
+//     value: SendData,
+//     callback: DeviceHandleSendCallback,
+//     user_data: UserData,
+// }
+
+// pub struct PollCommand {
+//     callback: DeviceHandleReceiveCallback,
+//     user_data: UserData,
+// }
+
+// pub struct DisconnectCommand {
+//     callback: DeviceHandleDisconnectCallback,
+//     user_data: UserData,
+// }
+
+// impl DisconnectCommand {
+//     pub fn new(callback: DeviceHandleDisconnectCallback, user_data: UserData) -> Self {
+//         Self {
+//             callback,
+//             user_data,
+//         }
+//     }
+// }
+
+// pub enum DeviceCommand {
+//     SendValue(SendValueCommand),
+//     Poll(PollCommand),
+//     Disconnect(DisconnectCommand),
+// }
+
+// pub struct ReceiveEvent {
+//     data: (),
+// }
+// pub struct SendData {
+//     data: (),
+// }

@@ -1,13 +1,16 @@
 use std::{
     ffi::{CString, NulError, c_char, c_void},
     ptr::NonNull,
+    thread,
 };
 
-use ffi_convert::{CDrop, CReprOf};
+use eyre::Context;
+use ffi_convert::{CDrop, CReprOf, UnexpectedNullPointerError};
+use tracing::{info, level_filters::LevelFilter};
 
 use crate::{
     config::NativeDeviceConfig,
-    device::{DeviceHandle, NativeDeviceHandle},
+    device::{DeviceHandle, NativeDeviceHandle, OpaqueDeviceHadle},
 };
 
 pub mod config;
@@ -20,8 +23,8 @@ unsafe impl Send for UserData {}
 
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy)]
-pub struct ErrorString(*const c_char);
-unsafe impl Send for ErrorString {}
+pub struct StaticString(*const c_char);
+unsafe impl Send for StaticString {}
 
 #[derive(Debug, Clone)]
 pub enum StringResult<T> {
@@ -32,7 +35,7 @@ pub enum StringResult<T> {
 #[repr(C)]
 pub enum NativeResult<T> {
     Ok(T),
-    Err(ErrorString),
+    Err(StaticString),
 }
 
 /// Borrows an ffi compatible struct from the input, the borrowed data does not have to be a reference
@@ -45,7 +48,7 @@ pub trait BorrowCRepr<T> {
 }
 
 pub trait BorrowAsRust<T> {
-    fn unsafe_borrow_as_rust<'a>(input: NonNull<Self>) -> &'a T;
+    fn borrow_as_rust<'a>(self) -> Result<&'a T, UnexpectedNullPointerError>;
 }
 
 // impl<T, U> BorrowCRepr<Result<T, CString>> for NativeResult<U>
@@ -82,7 +85,7 @@ where
             StringResult::Err(e) => {
                 let strptr = e.as_c_str().as_ptr();
 
-                NativeResult::Err(ErrorString(strptr))
+                NativeResult::Err(StaticString(strptr))
             }
         };
 
@@ -145,7 +148,7 @@ where
                 let str = cstring.as_c_str();
                 let ptr = str.as_ptr();
 
-                Self::Err(ErrorString(ptr))
+                Self::Err(StaticString(ptr))
             }
         }
     }
@@ -163,8 +166,32 @@ where
 //     }
 // }
 
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let console_layer = console_subscriber::spawn();
+
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive("astarte_device_sdk=debug".parse().unwrap())
+                .from_env_lossy()
+                .add_directive("tokio=trace".parse().unwrap())
+                .add_directive("runtime=trace".parse().unwrap())
+                .add_directive(LevelFilter::INFO.into()),
+        )
+        .try_init()
+        .unwrap();
+}
+
 pub type DeviceHandleConnectCallback =
     extern "C" fn(result: *const NativeResult<NativeDeviceHandle>, user_data: UserData);
+
+pub type DeviceHandleLoopCallback =
+    extern "C" fn(result: *const NativeResult<bool>, user_data: UserData);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn device_handle_connect(
@@ -174,19 +201,63 @@ pub extern "C" fn device_handle_connect(
     loop_cbk: DeviceHandleLoopCallback,
     loop_user_data: UserData,
 ) {
-    let result = DeviceHandle::connect(
-        config,
-        connect_cbk,
-        connect_user_data,
-        loop_cbk,
-        loop_user_data,
-    );
+    // FIXME remove this
+    // console_subscriber::init();
+    color_eyre::install().unwrap();
+    init_tracing();
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| eyre::eyre!("couldn't install default crypto provider"))
+        .unwrap();
+    // FIXME remove this end
 
-    result.unwrap();
+    let loop_end = move |result: Result<(), astarte_device_sdk::Error>| {
+        let result: eyre::Result<bool> = result.wrap_err("").map(|_| true);
+
+        let native_res = StringResult::<bool>::as_c_compat(result).unwrap();
+
+        loop_cbk(&NativeResult::borrow_raw(&native_res), loop_user_data);
+    };
+
+    thread::spawn(move || {
+        let result = DeviceHandle::connect(config, loop_end)
+            .map(|h| NativeDeviceHandle::c_repr_of(h).unwrap());
+
+        let c_result = StringResult::as_c_compat(result).unwrap();
+        let native_res = NativeResult::borrow_raw(&c_result);
+
+        connect_cbk(&native_res, connect_user_data);
+    });
 }
 
-pub type DeviceHandleLoopCallback =
+pub type DeviceHandleDisconnectCallback =
     extern "C" fn(result: *const NativeResult<bool>, user_data: UserData);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn device_handle_disconnect(
+    handle: NativeDeviceHandle,
+    disconnect_cbk: DeviceHandleDisconnectCallback,
+    user_data: UserData,
+) {
+    thread::spawn(move || {
+        let result = DeviceHandle::disconnect(handle).map(|_| true);
+        let native_res = StringResult::<bool>::as_c_compat(result).unwrap();
+
+        disconnect_cbk(&NativeResult::borrow_raw(&native_res), user_data);
+    });
+}
+
+pub type DeviceHandleSendCallback =
+    extern "C" fn(result: *const NativeResult<bool>, user_data: UserData);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn device_handle_disconnect(
+    handle: NativeDeviceHandle,
+    send_cbk: DeviceHandleSendCallback,
+    user_data: UserData,
+) {
+    //
+}
 
 // blocking function that waits for the device and runtime to stop
 // WARN this invalidates the device_handle pointer, it's only safe to use when we know the wrapper object won't be accessed no more

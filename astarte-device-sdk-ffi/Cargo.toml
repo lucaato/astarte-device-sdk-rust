@@ -14,9 +14,13 @@ crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 astarte-device-sdk.workspace = true
+color-eyre.workspace = true
+console-subscriber.workspace = true
+rustls.workspace = true
 tokio = { workspace = true, features = [
   # "rt",
   "rt-multi-thread",
+  "tracing",
   # "signal",
   # "test-util"
 ] }
@@ -25,4 +29,5 @@ ffi-convert.workspace = true
 ffi-convert-derive.workspace = true
 url.workspace = true
 tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # typeshare.workspace = true
