@@ -1,19 +1,22 @@
 use std::{
     ffi::{CString, NulError, c_char, c_void},
+    mem::ManuallyDrop,
     ptr::NonNull,
     thread,
 };
 
 use eyre::Context;
-use ffi_convert::{CDrop, CReprOf, UnexpectedNullPointerError};
+use ffi_convert::{CDrop, CReprOf, CReprOfError, UnexpectedNullPointerError};
 use tracing::{info, level_filters::LevelFilter};
 
 use crate::{
     config::NativeDeviceConfig,
+    data::{NativeDeviceData, NativeDeviceEvent},
     device::{DeviceHandle, NativeDeviceHandle, OpaqueDeviceHadle},
 };
 
 pub mod config;
+pub mod data;
 pub mod device;
 
 #[repr(transparent)]
@@ -22,21 +25,120 @@ pub struct UserData(*mut c_void);
 unsafe impl Send for UserData {}
 
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StaticString(*const c_char);
 unsafe impl Send for StaticString {}
 
-#[derive(Debug, Clone)]
-pub enum StringResult<T> {
-    Ok(T),
-    Err(CString),
+impl CDrop for StaticString {
+    fn do_drop(&mut self) -> Result<(), ffi_convert::CDropError> {
+        use ffi_convert::RawPointerConverter;
+
+        unsafe { std::ffi::CString::drop_raw_pointer(self.0)? };
+
+        Ok(())
+    }
+}
+
+impl CReprOf<String> for StaticString {
+    fn c_repr_of(input: String) -> Result<Self, CReprOfError> {
+        let leaked = CString::new(input)?.into_raw();
+
+        Ok(Self(leaked as *const c_char))
+    }
+}
+
+impl Drop for StaticString {
+    fn drop(&mut self) {
+        let _ = self.do_drop();
+    }
+}
+
+#[repr(transparent)]
+pub struct NativeManuallyDrop<T>(ManuallyDrop<T>);
+
+impl<T> NativeManuallyDrop<T> {
+    pub fn new(inner: T) -> Self {
+        Self(ManuallyDrop::new(inner))
+    }
+}
+
+impl<T> CDrop for NativeManuallyDrop<T> {
+    fn do_drop(&mut self) -> Result<(), ffi_convert::CDropError> {
+        // do not drop anything
+        Ok(())
+    }
+}
+
+impl<T, U: CDrop + CReprOf<T>> CReprOf<T> for NativeManuallyDrop<U> {
+    fn c_repr_of(input: T) -> Result<Self, CReprOfError> {
+        let native = Self::new(U::c_repr_of(input)?);
+
+        Ok(native)
+    }
 }
 
 #[repr(C)]
-pub enum NativeResult<T> {
+#[derive(Debug)]
+pub enum NativeStringResult<T: CDrop> {
     Ok(T),
     Err(StaticString),
 }
+
+impl<T> CDrop for NativeStringResult<T>
+where
+    T: CDrop,
+{
+    fn do_drop(&mut self) -> Result<(), ffi_convert::CDropError> {
+        // fields are automatically dropped by rust drop glue
+        Ok(())
+    }
+}
+
+impl<T> Drop for NativeStringResult<T>
+where
+    T: CDrop,
+{
+    fn drop(&mut self) {
+        let _ = self.do_drop();
+    }
+}
+
+impl<T, U: CDrop + CReprOf<T>> CReprOf<eyre::Result<T>> for NativeStringResult<U> {
+    fn c_repr_of(input: eyre::Result<T>) -> Result<Self, CReprOfError> {
+        let native = match input {
+            Ok(o) => Self::Ok(U::c_repr_of(o)?),
+            Err(e) => Self::Err(StaticString::c_repr_of(e.to_string())?),
+        };
+
+        Ok(native)
+    }
+}
+
+// // NOTE borrowed result contains always a borrowed error string
+// // from StringResult, that will be dropped automatically by rust
+// // the ok data will be copied
+// #[repr(C)]
+// pub enum BorrowedResult<T> {
+//     Ok(T),
+//     Err(StaticString),
+// }
+
+// impl<T> BorrowedResult<T> {
+//     fn borrow_err(input: &StringResult<T>) -> Self
+//     where
+//         T: Copy,
+//     {
+//         match input {
+//             StringResult::Ok(t) => Self::Ok(*t),
+//             StringResult::Err(cstring) => {
+//                 let str = cstring.as_c_str();
+//                 let ptr = str.as_ptr();
+
+//                 Self::Err(StaticString(ptr))
+//             }
+//         }
+//     }
+// }
 
 /// Borrows an ffi compatible struct from the input, the borrowed data does not have to be a reference
 /// This is useful for example when calling callbacks,
@@ -60,38 +162,38 @@ pub trait BorrowAsRust<T> {
 //     }
 // }
 
-impl<T> CDrop for NativeResult<T>
-where
-    T: CDrop,
-{
-    fn do_drop(&mut self) -> Result<(), ffi_convert::CDropError> {
-        match self {
-            NativeResult::Ok(o) => o.do_drop(),
-            NativeResult::Err(_e) => {
-                // NOTE the error string is still owned by rust we don't need to drop it
-                Ok(())
-            }
-        }
-    }
-}
+// impl<T> CDrop for NativeResult<T>
+// where
+//     T: CDrop,
+// {
+//     fn do_drop(&mut self) -> Result<(), ffi_convert::CDropError> {
+//         match self {
+//             NativeResult::Ok(o) => o.do_drop(),
+//             NativeResult::Err(_e) => {
+//                 // NOTE the error string is still owned by rust we don't need to drop it
+//                 Ok(())
+//             }
+//         }
+//     }
+// }
 
-impl<T, U> CReprOf<StringResult<T>> for NativeResult<U>
-where
-    U: CReprOf<T>,
-{
-    fn c_repr_of(input: StringResult<T>) -> Result<Self, ffi_convert::CReprOfError> {
-        let res = match input {
-            StringResult::Ok(o) => NativeResult::Ok(U::c_repr_of(o)?),
-            StringResult::Err(e) => {
-                let strptr = e.as_c_str().as_ptr();
+// impl<T, U> CReprOf<eyre::Result<T>> for NativeResult<U>
+// where
+//     U: CReprOf<T>,
+// {
+//     fn c_repr_of(input: eyre::Result<T>) -> Result<Self, ffi_convert::CReprOfError> {
+//         let res = match input {
+//             Ok(o) => NativeResult::Ok(U::c_repr_of(o)?),
+//             Err(e) => {
+//                 let strptr = CString::new(e.to_string())?.into_raw();
 
-                NativeResult::Err(StaticString(strptr))
-            }
-        };
+//                 NativeResult::Err(StaticString(strptr))
+//             }
+//         };
 
-        Ok(res)
-    }
-}
+//         Ok(res)
+//     }
+// }
 
 // returns a owned rust struct that can be borrowed with BorrowCRepr
 // this allows the caller to still have atuomatic drop of the resource
@@ -113,44 +215,29 @@ impl CCompatibleType<String> for CString {
     }
 }
 
-impl<T, U> CCompatibleType<eyre::Result<T>> for StringResult<U>
-where
-    U: CCompatibleType<T>,
-{
-    fn as_c_compat(input: eyre::Result<T>) -> Result<Self, NulError> {
-        let ok = match input {
-            Ok(o) => Self::Ok(U::as_c_compat(o)?),
-            Err(e) => {
-                let owned = CString::new(e.to_string())?;
+// impl<T, U> TryFrom<eyre::Result<T>> for NativeStringResult<U>
+// where
+//     U: CReprOf<T>,
+// {
+//     type Error = CReprOfError;
 
-                Self::Err(owned)
-            }
-        };
+//     fn try_from(value: eyre::Result<T>) -> Result<Self, Self::Error> {
+//         let res = match value {
+//             Ok(o) => Self::Ok(U::c_repr_of(o)?),
+//             Err(e) => {
+//                 let owned = CString::new(e.to_string())?;
 
-        Ok(ok)
-    }
-}
+//                 Self::Err(owned)
+//             }
+//         };
+
+//         Ok(res)
+//     }
+// }
 
 impl BorrowCRepr<bool> for bool {
     fn borrow_raw(input: &bool) -> Self {
         *input
-    }
-}
-
-impl<T, U> BorrowCRepr<StringResult<T>> for NativeResult<U>
-where
-    U: BorrowCRepr<T>,
-{
-    fn borrow_raw(input: &StringResult<T>) -> Self {
-        match input {
-            StringResult::Ok(t) => Self::Ok(U::borrow_raw(t)),
-            StringResult::Err(cstring) => {
-                let str = cstring.as_c_str();
-                let ptr = str.as_ptr();
-
-                Self::Err(StaticString(ptr))
-            }
-        }
     }
 }
 
@@ -188,10 +275,21 @@ fn init_tracing() {
 }
 
 pub type DeviceHandleConnectCallback =
-    extern "C" fn(result: *const NativeResult<NativeDeviceHandle>, user_data: UserData);
+    extern "C" fn(result: *const NativeStringResult<NativeDeviceHandle>, user_data: UserData);
 
 pub type DeviceHandleLoopCallback =
-    extern "C" fn(result: *const NativeResult<bool>, user_data: UserData);
+    extern "C" fn(result: *const NativeStringResult<bool>, user_data: UserData);
+
+// #[unsafe(no_mangle)]
+// pub extern "C" fn test_free() {
+//     let err = eyre::eyre!("this is a test error");
+
+//     let result: eyre::Result<bool> = Err(err);
+
+//     let string_res = NativeStringResult::<bool>::c_repr_of(result).unwrap();
+
+//     println!("{:?}", string_res);
+// }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn device_handle_connect(
@@ -212,26 +310,24 @@ pub extern "C" fn device_handle_connect(
     // FIXME remove this end
 
     let loop_end = move |result: Result<(), astarte_device_sdk::Error>| {
-        let result: eyre::Result<bool> = result.wrap_err("").map(|_| true);
+        let result: eyre::Result<bool> = result.wrap_err("error in handle_events").map(|_| true);
 
-        let native_res = StringResult::<bool>::as_c_compat(result).unwrap();
+        let c_res = NativeStringResult::c_repr_of(result).unwrap();
 
-        loop_cbk(&NativeResult::borrow_raw(&native_res), loop_user_data);
+        loop_cbk(&c_res, loop_user_data);
     };
 
     thread::spawn(move || {
-        let result = DeviceHandle::connect(config, loop_end)
-            .map(|h| NativeDeviceHandle::c_repr_of(h).unwrap());
+        let result = DeviceHandle::connect(config, loop_end);
 
-        let c_result = StringResult::as_c_compat(result).unwrap();
-        let native_res = NativeResult::borrow_raw(&c_result);
+        let c_res = NativeStringResult::c_repr_of(result).unwrap();
 
-        connect_cbk(&native_res, connect_user_data);
+        connect_cbk(&c_res, connect_user_data);
     });
 }
 
 pub type DeviceHandleDisconnectCallback =
-    extern "C" fn(result: *const NativeResult<bool>, user_data: UserData);
+    extern "C" fn(result: *const NativeStringResult<bool>, user_data: UserData);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn device_handle_disconnect(
@@ -241,23 +337,41 @@ pub extern "C" fn device_handle_disconnect(
 ) {
     thread::spawn(move || {
         let result = DeviceHandle::disconnect(handle).map(|_| true);
-        let native_res = StringResult::<bool>::as_c_compat(result).unwrap();
 
-        disconnect_cbk(&NativeResult::borrow_raw(&native_res), user_data);
+        let c_res = NativeStringResult::c_repr_of(result).unwrap();
+
+        disconnect_cbk(&c_res, user_data);
     });
 }
 
-pub type DeviceHandleSendCallback =
-    extern "C" fn(result: *const NativeResult<bool>, user_data: UserData);
+pub type DeviceHandleReceiveCallback = extern "C" fn(
+    result: *const NativeStringResult<NativeManuallyDrop<NativeDeviceEvent>>,
+    user_data: UserData,
+);
 
 #[unsafe(no_mangle)]
-pub extern "C" fn device_handle_disconnect(
-    handle: NativeDeviceHandle,
-    send_cbk: DeviceHandleSendCallback,
+pub extern "C" fn device_client_receive(
+    device_handle: NativeDeviceHandle,
+    callback: DeviceHandleReceiveCallback,
     user_data: UserData,
 ) {
-    //
+    let cbk = move |res| {
+        let c_res = NativeStringResult::c_repr_of(res).unwrap();
+
+        callback(&c_res, user_data);
+    };
+
+    DeviceHandle::receive(device_handle, cbk);
 }
+
+// NOTE since device event could contain a lot of data we avoid copying it when over to foreign functions
+#[unsafe(no_mangle)]
+pub extern "C" fn device_client_free_device_event(mut event: NativeDeviceEvent) {
+    event.do_drop().unwrap()
+}
+
+// pub type DeviceHandleSendCallback =
+//     extern "C" fn(result: *const NativeResult<bool>, user_data: UserData);
 
 // blocking function that waits for the device and runtime to stop
 // WARN this invalidates the device_handle pointer, it's only safe to use when we know the wrapper object won't be accessed no more
@@ -560,25 +674,6 @@ pub extern "C" fn device_client_start(config: *const CAstarteDeviceConfig) -> *m
     });
 
     Box::into_raw(Box::new(CDeviceHandle { tx, runtime_thread }))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn device_client_receive(
-    device_handle: *mut CDeviceHandle,
-    callback: AstarteDeviceReceiveCallback,
-    user_data: *mut c_void,
-) {
-    let device = unsafe { device_handle.as_ref().unwrap() };
-
-    println!("rust: sending poll element");
-    device
-        .tx
-        .blocking_send(InternalDeviceCommand::PollElement {
-            callback,
-            user_data: UserData(user_data),
-        })
-        .unwrap();
-    println!("rust: poll element sent");
 }
 
 #[unsafe(no_mangle)]

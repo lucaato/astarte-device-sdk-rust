@@ -112,6 +112,11 @@ impl AstarteObject {
     pub fn into_key_values(self) -> impl Iterator<Item = (String, AstarteData)> {
         self.inner.into_iter()
     }
+
+    /// Returns a vec containing all the entries of the object.
+    pub fn into_vec(self) -> Vec<(String, AstarteData)> {
+        self.inner
+    }
 }
 
 impl FromIterator<(String, AstarteData)> for AstarteObject {

@@ -485,8 +485,6 @@ typedef struct NativeStringResult_NativeManuallyDrop_NativeDeviceEvent {
 typedef void (*DeviceHandleReceiveCallback)(const struct NativeStringResult_NativeManuallyDrop_NativeDeviceEvent *result,
                                             UserData user_data);
 
-void test_free(void);
-
 void device_handle_connect(struct NativeDeviceConfig config,
                            DeviceHandleConnectCallback connect_cbk,
                            UserData connect_user_data,
