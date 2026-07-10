@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import struct
+import array
 import re
 import asyncio
 import datetime
 from cffi import FFI
 from pathlib import Path
 from typing import Union
-from collections.abc import Sequence
+from collections.abc import Sequence, Iterable, Iterator
 from types import MappingProxyType
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -47,9 +49,37 @@ def _get_lib():
         _lib = ffi.dlopen(_find_library())
     return _lib
 
-class DeviceBinayBlob:
-    def __init__(self, c_array: FFI.CData):
-        self._view = memoryview(ffi.buffer(c_array.data_ptr, c_array.size)).cast("B").toreadonly()
+class DeviceBinaryBlob:
+    # TODO implement buffer protocol too
+    
+    def __init__(self, view: memoryview, event: DeviceEvent | None = None):
+        # Store reference to parent event to prevent use-after-free
+        self._event = event
+        self._view = view
+
+    @staticmethod
+    def from_bytes(buf: bytes) -> DeviceBinaryBlob:
+        view = memoryview(buf).cast("B").toreadonly()
+        return DeviceBinaryBlob(view)
+
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceBinaryBlob:
+        data = value.data_ptr
+        len: int = value.size
+
+        buffer = ffi.buffer(data, len)
+        view = memoryview(buffer).cast("B").toreadonly()
+
+        return DeviceBinaryBlob(view, event)
+
+    def to_cdata(self) -> FFI.CData:
+        # this keeps a reference to event so no data is freed until this buffer goes out of scope
+        buffer = ffi.from_buffer("uint8_t *", self)
+
+        native = ffi.new("CArray_u8")
+        native.data_ptr = buffer
+        native.size = len(buffer)
+        return native
 
     def __bytes__(self):
         return self._view.tobytes()
@@ -59,37 +89,34 @@ class DeviceBinayBlob:
 
     def __getitem__(self, i):
         if isinstance(i, slice):
-            return [self._view[j] for j in range(*i.indices(self.__len__()))]
-        if i < 0 or i >= self._len:
+            return [self._view[j] for j in range(*i.indices(len(self)))]
+        if i < 0 or i >= len(self):
             raise IndexError("Array index out of range")
         return self._view[i]
 
     def __iter__(self):
-        for i in range(self.__len__()):
+        for i in range(len(self)):
             yield self._view[i]
+
+    def __buffer__(self, flags):
+        return self._view.__buffer__(flags)
 
 DeviceDataScalarType = Union[
     float,
     int,
     bool,
     str,
-    DeviceBinayBlob,
+    DeviceBinaryBlob,
     datetime.datetime,
 ]
 
 DeviceDataVectorType = (
     Sequence[float] | Sequence[int] | Sequence[bool] | 
-    Sequence[str] | Sequence[DeviceBinayBlob] | Sequence[datetime.datetime]
+    Sequence[str] | Sequence[DeviceBinaryBlob] | Sequence[datetime.datetime]
 )
 
 class DeviceData(ABC):
     """Abstract base class for DeviceData variants."""
-
-    def as_vector(self) -> DeviceDataVectorType | None:
-        """
-        Returns the underlying sequence if this value is a vector.
-        """
-        return None
 
     def as_value(self) -> DeviceDataScalarType | None:
         """
@@ -97,42 +124,54 @@ class DeviceData(ABC):
         """
         return None
 
+    def as_vector(self) -> DeviceDataVectorType | None:
+        """
+        Returns the underlying immutable data if this value is a vector.
+        """
+        return None
+
+    @abstractmethod
+    def to_cdata(self) -> FFI.CData:
+        """
+        Returns the cdata enum representing this class data **without coping**.
+        """
+        pass
+
     @staticmethod
-    def from_cdata(value: FFI.CData) -> DeviceData:
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceData:
         tag = value.tag
         lib = _get_lib()
         
         if tag == lib.Double:
-            return DeviceDataDouble(value.double_)
+            return DeviceDataDouble.from_cdata(value)
         elif tag == lib.Integer:
-            return DeviceDataInteger(value.integer)
+            return DeviceDataInteger.from_cdata(value)
         elif tag == lib.Boolean:
-            return DeviceDataBoolean(value.boolean)
+            return DeviceDataBoolean.from_cdata(value)
         elif tag == lib.LongInteger:
-            return DeviceDataLongInteger(value.long_integer)
+            return DeviceDataLongInteger.from_cdata(value)
         elif tag == lib.String:
-            return DeviceDataString(value.string)
+            return DeviceDataString.from_cdata(value)
         elif tag == lib.BinaryBlob:
-            return DeviceDataBinaryBlob(value.binary_blob)
+            return DeviceDataBinaryBlob.from_cdata(value, event)
         elif tag == lib.DateTime:
-            return DeviceDataDateTime(value.date_time)
+            return DeviceDataDateTime.from_cdata(value)
         elif tag == lib.DoubleArray:
-            return DeviceDataDoubleArray(value.double_array)
+            return DeviceDataDoubleArray.from_cdata(value, event)
         elif tag == lib.IntegerArray:
-            return DeviceDataIntegerArray(value.integer_array)
+            return DeviceDataIntegerArray.from_cdata(value, event)
         elif tag == lib.BooleanArray:
-            return DeviceDataBooleanArray(value.boolean_array)
+            return DeviceDataBooleanArray.from_cdata(value, event)
         elif tag == lib.LongIntegerArray:
-            return DeviceDataLongIntegerArray(value.long_integer_array)
+            return DeviceDataLongIntegerArray.from_cdata(value, event)
         elif tag == lib.StringArray:
-            return DeviceDataStringArray(value.string_array)
+            return DeviceDataStringArray.from_cdata(value)
         elif tag == lib.BinaryBlobArray:
-            return DeviceDataBinaryBlobArray(value.binary_blob_array)
+            return DeviceDataBinaryBlobArray.from_cdata(value, event)
         elif tag == lib.DateTimeArray:
-            return DeviceDataDateTimeArray(value.date_time_array)
+            return DeviceDataDateTimeArray.from_cdata(value)
         else:
             raise InvalidNativeValueError(f"Unknown DeviceData tag: {tag}")
-
 
 class DeviceDataDouble(DeviceData):
     def __init__(self, double_val: float):
@@ -141,6 +180,17 @@ class DeviceDataDouble(DeviceData):
     def as_value(self) -> float:
         return self._value
 
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataDouble:
+        return DeviceDataDouble(value.double_)
+
+    def to_cdata(self) -> FFI.CData:
+        native = ffi.new("NativeDeviceData *")
+
+        native.tag = _get_lib().Double
+        native.double_ = self._value
+
+        return native
 
 class DeviceDataInteger(DeviceData):
     def __init__(self, int_val: int):
@@ -149,6 +199,15 @@ class DeviceDataInteger(DeviceData):
     def as_value(self) -> int:
         return self._value
 
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataInteger:
+        return DeviceDataInteger(value.integer)
+
+    def to_cdata(self) -> FFI.CData:
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().Integer
+        native.integer = self._value
+        return native
 
 class DeviceDataBoolean(DeviceData):
     def __init__(self, bool_val: bool):
@@ -157,6 +216,15 @@ class DeviceDataBoolean(DeviceData):
     def as_value(self) -> bool:
         return self._value
 
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataBoolean:
+        return DeviceDataBoolean(value.boolean)
+
+    def to_cdata(self) -> FFI.CData:
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().Boolean
+        native.boolean = self._value
+        return native
 
 class DeviceDataLongInteger(DeviceData):
     def __init__(self, long_int_val: int):
@@ -165,221 +233,401 @@ class DeviceDataLongInteger(DeviceData):
     def as_value(self) -> int:
         return self._value
 
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataLongInteger:
+        return DeviceDataLongInteger(value.long_integer)
+
+    def to_cdata(self) -> FFI.CData:
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().LongInteger
+        native.long_integer = self._value
+        return native
 
 class DeviceDataString(DeviceData):
-    def __init__(self, c_string: FFI.CData):
-        self._value = ffi.string(c_string).decode("utf-8")
+    def __init__(self, value: str):
+        self._value = value
 
     def as_value(self) -> str:
         return self._value
 
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataString:
+        string = ffi.string(value.string).decode("utf-8")
+
+        return DeviceDataString(string)
+
+    def to_cdata(self) -> FFI.CData:
+        string = ffi.new("char *", self._value);
+
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().String
+        native.string = string
+        return native
 
 class DeviceDataBinaryBlob(DeviceData):
-    def __init__(self, c_array: FFI.CData):
-        self._value = DeviceBinayBlob(c_array)
+    def __init__(self, blob: DeviceBinaryBlob):
+        self._value = blob
 
-    def as_value(self) -> DeviceBinayBlob:
+    @staticmethod
+    def from_bytes(buf: bytes) -> DeviceDataBinaryBlob:
+        blob = DeviceBinaryBlob.from_bytes(buf)
+        return DeviceDataBinaryBlob(blob)
+
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataBinaryBlob:
+        blob = DeviceBinaryBlob.from_cdata(value.binary_blob, event)
+        return DeviceDataBinaryBlob(blob)
+
+    def to_cdata(self) -> FFI.CData:
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().BinaryBlob
+        native.binary_blob = self._value.to_cdata()
+        return native
+
+    def as_value(self) -> DeviceBinaryBlob:
         return self._value
 
 
 class DeviceDataDateTime(DeviceData):
-    def __init__(self, timestamp_ms: int):
-        self._value = datetime.datetime.fromtimestamp(timestamp_ms / 1000.0)
+    def __init__(self, timestamp: datetime.datetime):
+        self._value = timestamp
+
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataDateTime:
+        timestamp_ms: int = value.date_time
+        ts = datetime.datetime.fromtimestamp(timestamp_ms / 1000.0)
+        return DeviceDataDateTime(ts)
+
+    def to_cdata(self) -> FFI.CData:
+        timestamp_ms = int(self._value.timestamp() * 1000.0)
+
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().DateTime
+        native.date_time = timestamp_ms 
+        return native
 
     def as_value(self) -> datetime.datetime:
         return self._value
 
 
 # --- Array Variants ---
-# NOTE for array variants data that needs to be mapped is getting mapped when accessed
+# NOTE for array variants data is getting mapped when accessed
 # for example accessing a string element of an array will copy the data at that time
 # evaluate if this is desirable or shuld be changed
 # array of native types are just getting read out of native data
+# so no copy but data needs to be kept alive
 
 class DeviceDataDoubleArray(DeviceData):
-    def __init__(self, c_array: FFI.CData):
-        self._ptr = c_array.data_ptr
-        self._len = c_array.size
+    def __init__(self, view: memoryview[float], event: DeviceEvent | None = None):
+        if view.format != "d":
+            raise ValueError("expected a view of type d")
 
-    def as_vector(self) -> Sequence[float]:
-        return self
+        # NOTE Store reference to parent event to prevent use-after-free this type does not copy
+        self._event = event
+        self._view = view.toreadonly()
+
+    @staticmethod
+    def from_array(arr: array.array) -> DeviceDataDoubleArray:
+        if arr.typecode != "d":
+            raise ValueError("expected a view of type d")
+
+        view: memoryview[float] = memoryview(arr)
+        return DeviceDataDoubleArray(view)
+
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataDoubleArray:
+        data_ptr = value.double_array.data_ptr
+        len = value.double_array.size
+
+        buffer = ffi.buffer(data_ptr, len * struct.calcsize("d"))
+        view = memoryview(buffer).cast("d")
+
+        return DeviceDataDoubleArray(view, event)
+
+    def to_cdata(self) -> FFI.CData:
+        # wrap self to keep alive the data
+        buffer = ffi.from_buffer("double[]", self)
+
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().DoubleArray
+        native.double_array.data_ptr = buffer
+        native.double_array.size = len(self)
+        return native
 
     def __len__(self) -> int:
-        return self._len
+        return len(self._view)
 
-    def __getitem__(self, i):
-        if isinstance(i, slice):
-            return [self._ptr[j] for j in range(*i.indices(self._len))]
-        if i < 0 or i >= self._len:
-            raise IndexError("Array index out of range")
-        return self._ptr[i]
+    # def __getitem__(self, i):
+    #     if isinstance(i, slice):
+    #         return [self._ptr[j] for j in range(*i.indices(self._len))]
+    #     if i < 0 or i >= self._len:
+    #         raise IndexError("Array index out of range")
+    #     return self._ptr[i]
 
-    def __iter__(self):
-        for i in range(self._len):
-            yield self._ptr[i]
+    # def __iter__(self):
+    #     for i in range(self._len):
+    #         yield self._ptr[i]
 
+    def __buffer__(self, flags):
+        return memoryview(self._view).__buffer__(flags)
 
 class DeviceDataIntegerArray(DeviceData):
-    def __init__(self, c_array: FFI.CData):
-        self._ptr = c_array.data_ptr
-        self._len = c_array.size
+    def __init__(self, view: memoryview[int], event: DeviceEvent | None = None):
+        if view.format != "i":
+            raise ValueError("expected a view of type i")
 
-    def as_vector(self) -> Sequence[int]:
-            return self
+        # NOTE Store reference to parent event to prevent use-after-free this type does not copy
+        self._event = event
+        self._view = view.toreadonly()
+
+    @staticmethod
+    def from_array(arr: array.array) -> DeviceDataIntegerArray:
+        if arr.typecode != "i":
+            raise ValueError("expected an array of type i")
+
+        view: memoryview[int] = memoryview(arr)
+        return DeviceDataIntegerArray(view)
+
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataIntegerArray:
+        data_ptr = value.integer_array.data_ptr
+        len = value.integer_array.size
+
+        buffer = ffi.buffer(data_ptr, len * struct.calcsize("i"))
+        view = memoryview(buffer).cast("i")
+
+        return DeviceDataIntegerArray(view, event)
+
+    def to_cdata(self) -> FFI.CData:
+        # wrap self to keep alive the data
+        buffer = ffi.from_buffer("int32_t[]", self)
+
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().IntegerArray
+        native.integer_array.data_ptr = buffer
+        native.integer_array.size = len(self)
+        return native
 
     def __len__(self) -> int:
-        return self._len
+        return len(self._view)
 
-    def __getitem__(self, i):
-        if isinstance(i, slice):
-            return [self._ptr[j] for j in range(*i.indices(self._len))]
-        if i < 0 or i >= self._len:
-            raise IndexError("Array index out of range")
-        return self._ptr[i]
-
-    def __iter__(self):
-        for i in range(self._len):
-            yield self._ptr[i]
+    def __buffer__(self, flags):
+        return memoryview(self._view).__buffer__(flags)
 
 
 class DeviceDataBooleanArray(DeviceData):
-    def __init__(self, c_array: FFI.CData):
-        self._ptr = c_array.data_ptr
-        self._len = c_array.size
+    def __init__(self, view: memoryview[bool], event: DeviceEvent | None = None):
+        if view.format != "?":
+            raise ValueError("expected a view of type ?")
 
-    def as_vector(self) -> Sequence[bool]:
-            return self
+        # NOTE Store reference to parent event to prevent use-after-free this type does not copy
+        self._event = event
+        self._view = view.toreadonly()
+
+    @staticmethod
+    def from_list(bools: list[bool]) -> DeviceDataBooleanArray:
+        buffer = ffi.buffer("bool[]", bools)
+        view = memoryview(buffer).cast("?")
+
+        return DeviceDataBooleanArray(view)
+
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataBooleanArray:
+        data_ptr = value.boolean_array.data_ptr
+        len = value.boolean_array.size
+
+        buffer = ffi.buffer(data_ptr, len * struct.calcsize("?"))
+        view = memoryview(buffer).cast("?")
+
+        return DeviceDataBooleanArray(view, event)
+
+    def to_cdata(self) -> FFI.CData:
+        # wrap self to keep alive the data
+        buffer = ffi.from_buffer("bool[]", self)
+
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().BooleanArray
+        native.boolean_array.data_ptr = buffer
+        native.boolean_array.size = len(self)
+        return native
 
     def __len__(self) -> int:
-        return self._len
+        return len(self._view)
 
-    def __getitem__(self, i):
-        if isinstance(i, slice):
-            return [self._ptr[j] for j in range(*i.indices(self._len))]
-        if i < 0 or i >= self._len:
-            raise IndexError("Array index out of range")
-        return self._ptr[i]
-
-    def __iter__(self):
-        for i in range(self._len):
-            yield self._ptr[i]
+    def __buffer__(self, flags):
+        return memoryview(self._view).__buffer__(flags)
 
 
 class DeviceDataLongIntegerArray(DeviceData):
-    def __init__(self, c_array: FFI.CData):
-        self._ptr = c_array.data_ptr
-        self._len = c_array.size
+    def __init__(self, view: memoryview[int], event: DeviceEvent | None = None):
+        if view.format != "q":
+            raise ValueError("expected a view of type q")
 
-    def as_vector(self) -> Sequence[int]:
-            return self
-        
+        # NOTE Store reference to parent event to prevent use-after-free this type does not copy
+        self._event = event
+        self._view = view.toreadonly()
+
+    @staticmethod
+    def from_array(arr: array.array) -> DeviceDataLongIntegerArray:
+        if arr.typecode != "q":
+            raise ValueError("expected an array of type q")
+
+        view: memoryview[int] = memoryview(arr)
+        return DeviceDataLongIntegerArray(view)
+
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataLongIntegerArray:
+        data_ptr = value.long_integer_array.data_ptr
+        len = value.long_integer_array.size
+
+        buffer = ffi.buffer(data_ptr, len * struct.calcsize("q"))
+        view = memoryview(buffer).cast("q")
+
+        return DeviceDataLongIntegerArray(view, event)
+
+    def to_cdata(self) -> FFI.CData:
+        # wrap self to keep alive the data
+        buffer = ffi.from_buffer("int64_t[]", self)
+
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().LongIntegerArray
+        native.long_integer_array.data_ptr = buffer
+        native.long_integer_array.size = len(self)
+        return native
+
     def __len__(self) -> int:
-        return self._len
+        return len(self._view)
 
-    def __getitem__(self, i):
-        if isinstance(i, slice):
-            return [self._ptr[j] for j in range(*i.indices(self._len))]
-        if i < 0 or i >= self._len:
-            raise IndexError("Array index out of range")
-        return self._ptr[i]
-
-    def __iter__(self):
-        for i in range(self._len):
-            yield self._ptr[i]
+    def __buffer__(self, flags):
+        return memoryview(self._view).__buffer__(flags)
 
 
 class DeviceDataStringArray(DeviceData):
-    def __init__(self, c_array: FFI.CData):
-        self._ptr = c_array.data
-        self._len = c_array.size
+    def __init__(self, strings: list[str]):
+        self._strings = strings
 
-    def as_vector(self) -> Sequence[str]:
-            return self
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataStringArray:
+        ptr = value.string_array.data
+        len = value.string_array.size
 
-    def __len__(self) -> int:
-        return self._len
+        strings = [ffi.string(ptr[i]).decode("utf-8") for i in range(len)]
 
-    def __getitem__(self, i):
-        if isinstance(i, slice):
-            return [ffi.string(self._ptr[j]).decode("utf-8") for j in range(*i.indices(self._len))]
-        if i < 0 or i >= self._len:
-            raise IndexError("Array index out of range")
-        return ffi.string(self._ptr[i]).decode("utf-8")
+        return DeviceDataStringArray(strings)
 
-    def __iter__(self):
-        for i in range(self._len):
-            yield ffi.string(self._ptr[i]).decode("utf-8")
+    def to_cdata(self) -> FFI.CData:
+        cdata_list = [ffi.new("char[]", s.encode("utf-8")) for s in self._strings]
+        native_strings = ffi.new("char*[]", cdata_list)
 
-
-class DeviceDataBinaryBlobArray(DeviceData):
-    def __init__(self, c_array: FFI.CData):
-        self._ptr = c_array.data_ptr
-        self._len = c_array.size
-
-    def as_vector(self) -> Sequence[DeviceBinayBlob]:
-            return self
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().StringArray
+        native.string_array.data = native_strings
+        native.string_array.size = len(self)
+        return native
 
     def __len__(self) -> int:
-        return self._len
+        return len(self._strings)
 
     def __getitem__(self, i):
-        if isinstance(i, slice):
-            return [DeviceBinayBlob(self._ptr[j]) for j in range(*i.indices(self._len))]
-        if i < 0 or i >= self._len:
-            raise IndexError("Array index out of range")
-        return DeviceBinayBlob(self._ptr[i])
+        return self._strings[i]
 
     def __iter__(self):
-        for i in range(self._len):
-            yield DeviceBinayBlob(self._ptr[i])
+        self._strings.__iter__()
 
+
+class DeviceDataBinaryBlobArray(DeviceData, Iterable[DeviceBinaryBlob]):
+    def __init__(self, blobs: list[DeviceBinaryBlob]):
+        self._blobs = blobs
+
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataBinaryBlobArray:
+        ptr = value.binary_blob_array.data_ptr
+        len: int = value.binary_blob_array.size
+
+        blobs = [DeviceBinaryBlob.from_cdata(ptr[i], event) for i in range(len)]
+
+        return DeviceDataBinaryBlobArray(blobs)
+
+    def to_cdata(self) -> FFI.CData:
+        cdata_list = [b.to_cdata() for b in self._blobs]
+        native_blobs = ffi.new("struct CArray_u8[]", cdata_list)
+
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().BinaryBlobArray
+        native.binary_blob_array.data_ptr = native_blobs
+        native.binary_blob_array.size = len(self)
+        return native
+
+    def __len__(self) -> int:
+        return len(self._blobs)
+
+    def __getitem__(self, i):
+        return self._blobs[i]
+
+    def __iter__(self) -> Iterator[DeviceBinaryBlob]:
+        return self._blobs.__iter__()
 
 
 class DeviceDataDateTimeArray(DeviceData):
-    def __init__(self, c_array: FFI.CData):
-        self._ptr = c_array.data_ptr
-        self._len = c_array.size
+    def __init__(self, datetimes: list[datetime.datetime]):
+        # NOTE Store reference to parent event to prevent use-after-free this type does not copy (it copies when an item is requested)
+        self._datetimes = datetimes
 
-    def as_vector(self) -> Sequence[datetime.datetime]:
-            return self
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataDateTimeArray:
+        data = value.date_time_array.data_ptr
+        len: int = value.date_time_array.size
+
+        datetimes = [datetime.datetime.fromtimestamp(data[i] / 1000.0) for i in range(len)]
+
+        return DeviceDataDateTimeArray(datetimes)
+
+    def to_cdata(self) -> FFI.CData:
+        cdata_list = [int(d.timestamp() * 1000.0) for d in self._datetimes]
+        native_datetimes = ffi.new("NativeTimestamp[]", cdata_list)
+
+        native = ffi.new("NativeDeviceData *")
+        native.tag = _get_lib().DateTimeArray
+        native.date_time_array.data_ptr = native_datetimes
+        native.date_time_array.size = len(self)
+        return native
 
     def __len__(self) -> int:
-        return self._len
+        return len(self._datetimes)
 
     def __getitem__(self, i):
-        if isinstance(i, slice):
-            return [datetime.datetime.fromtimestamp(self._ptr[j] / 1000.0) for j in range(*i.indices(self._len))]
-        if i < 0 or i >= self._len:
-            raise IndexError("Array index out of range")
-        return datetime.datetime.fromtimestamp(self._ptr[i] / 1000.0)
+        return self._datetimes[i]
 
     def __iter__(self):
-        for i in range(self._len):
-            yield datetime.datetime.fromtimestamp(self._ptr[i] / 1000.0)
+        self._datetimes.__iter__()
 
 
 class DeviceValue(ABC):
     """Abstract base class for DeviceValue variants."""
+    def __init__(self, event: DeviceEvent | None = None):
+        # Store reference to parent event to prevent use-after-free
+        self._event = event
+    
     @staticmethod
-    def from_cdata(value: FFI.CData) -> DeviceValue:
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceValue:
         tag = value.tag
         lib = _get_lib()
         
         if tag == lib.Individual:
-            return DeviceValueIndividual(value.individual)
+            return DeviceValueIndividual(value.individual, event)
         elif tag == lib.Object:
-            return DeviceValueObject(value.object)
+            return DeviceValueObject(value.object, event)
         elif tag == lib.PropertySet:
-            return DeviceValuePropertySet(value.property_set)
+            return DeviceValuePropertySet(value.property_set, event)
         elif tag == lib.PropertyUnset:
-            return DeviceValuePropertyUnset()
+            return DeviceValuePropertyUnset(event)
         else:
             raise InvalidNativeValueError(f"Unknown DeviceValue tag: {tag}")
 
 
 class DeviceValueIndividual(DeviceValue):
-    def __init__(self, value: FFI.CData):
-        self._data = DeviceData.from_cdata(value.data)
+    def __init__(self, value: FFI.CData, event: DeviceEvent | None = None):
+        super().__init__(event)
+        self._data = DeviceData.from_cdata(value.data, event)
         self._timestamp = datetime.datetime.fromtimestamp(value.timestamp / 1000.0)
 
     @property
@@ -392,21 +640,22 @@ class DeviceValueIndividual(DeviceValue):
 
 
 class DeviceValueObject(DeviceValue):
-    def __init__(self, value: FFI.CData):
-        self._data = self.__data_to_map(value.data)
+    def __init__(self, value: FFI.CData, event: DeviceEvent | None = None):
+        super().__init__(event)
+        self._data = self.__data_to_map(value.data, event)
         self._timestamp = datetime.datetime.fromtimestamp(value.timestamp / 1000.0)
 
-    def __entry_tuple(self, entry: FFI.CData) -> tuple[str, DeviceData]:
+    def __entry_tuple(self, entry: FFI.CData, event: DeviceEvent | None = None) -> tuple[str, DeviceData]:
         path = ffi.string(entry.path).decode("utf-8")
-        value = DeviceData.from_cdata(entry.value)
+        value = DeviceData.from_cdata(entry.value, event)
 
         return (path, value)
 
-    def __data_to_map(self, entries: FFI.CData) -> MappingProxyType[str, DeviceData]:
+    def __data_to_map(self, entries: FFI.CData, event: DeviceEvent | None = None) -> MappingProxyType[str, DeviceData]:
         map = {}
 
         for i in range(0, entries.size):
-            (path, value) = self.__entry_tuple(entries.data_ptr[i])
+            (path, value) = self.__entry_tuple(entries.data_ptr[i], event)
             map[path] = value
 
         return MappingProxyType(map)
@@ -421,8 +670,9 @@ class DeviceValueObject(DeviceValue):
 
 
 class DeviceValuePropertySet(DeviceValue):
-    def __init__(self, value: FFI.CData):
-        self._property = DeviceData.from_cdata(value)
+    def __init__(self, value: FFI.CData, event: DeviceEvent | None = None):
+        super().__init__(event)
+        self._property = DeviceData.from_cdata(value, event)
 
     @property
     def property(self) -> DeviceData:
@@ -430,8 +680,8 @@ class DeviceValuePropertySet(DeviceValue):
 
 
 class DeviceValuePropertyUnset(DeviceValue):
-    def __init__(self):
-        pass
+    def __init__(self, event: DeviceEvent | None = None):
+        super().__init__(event)
 
 
 # ==========================================
@@ -445,7 +695,7 @@ class DeviceEvent:
 
         self._interface = ffi.string(self._ptr.interface).decode("utf-8")
         self._path = ffi.string(self._ptr.path).decode("utf-8")
-        self._data = DeviceValue.from_cdata(self._ptr.data)
+        self._data = DeviceValue.from_cdata(self._ptr.data, self)
 
     @property
     def interface(self) -> str:
@@ -486,6 +736,14 @@ class Device:
         # list of handles to keep alive created by cffi.new_handle function
         self._handles = set()
 
+    def __del__(self):
+        print("freeing handle")
+
+        if len(self._handles) != 0:
+            print("error: some handles are still present while the object is being gced")
+
+        _get_lib().device_handle_free(self._ptr)
+
     def ffi_handle(self, handle_data: any) -> FFI.CData:
         c_handle = ffi.new_handle(handle_data)
         self._handles.add(c_handle)
@@ -494,7 +752,7 @@ class Device:
 
     @staticmethod
     def from_ffi_handle(c_handle: FFI.CData) -> any:
-        # TODO here we should return a subclass of some device data that always contains a reference to the Device
+        # TODO here we should return a superclass of device data that always contains a reference to the Device
         # this way we can use it to retrieve the handles set and remove the handle we converted
         handle_data = ffi.from_handle(c_handle)
         # NOTE this will raise an error if the handle was not stored before (from_ffi_handle can be called only once!)
@@ -553,11 +811,60 @@ class Device:
 
         return future
 
+    def send_individual(self, interface: str, path: str, data: DeviceData, timestamp: datetime.datetime | None = None) -> asyncio.Future[None]:
+        interface_cstr = ffi.new("char[]", interface.encode())
+        path_cstr = ffi.new("char[]", path.encode())
+        data_c = data.to_cdata()[0]
+
+        individual_data = ffi.new("NativeIndividualSend *")
+        individual_data.interface = interface_cstr
+        individual_data.path = path_cstr
+        individual_data.data = data_c
+        if timestamp is None:
+            individual_data.timestamp.tag = _get_lib().None_NativeTimestamp
+        else:
+            individual_data.timestamp.tag = _get_lib().Some_NativeTimestamp
+            individual_data.timestamp.some = int(timestamp.timestamp() * 1000.0)
+
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        handle = self.ffi_handle(SendFutureData(future, self))
+
+        _get_lib().device_client_send_individual(self._ptr, individual_data, send_cbk, handle)
+
+        return future
+
+
 class InvalidNativeValueError(Exception):
     pass
 
+class SendFutureData:
+    def __init__(self, future: asyncio.Future[None], device: Device):
+        self.future = future
+        self.device = device
+
+class SendError(Exception):
+    pass
+
+@ffi.callback("void(const struct NativeStringResult_bool *, UserData)")
+def send_cbk(native_res, user_data):
+    data: SendFutureData = Device.from_ffi_handle(user_data)
+
+    # FIXME maybe here we have to check if the future got cancelled
+    
+    if native_res.tag == _get_lib().Ok_bool:
+        data.future.get_loop().call_soon_threadsafe(data.future.set_result, None)
+    elif native_res.tag == _get_lib().Err_bool:
+        error_str = ffi.string(native_res.err, 1024).decode("utf-8")
+        error = SendError(error_str)
+        data.future.get_loop().call_soon_threadsafe(data.future.set_exception, error)
+    else:
+        # FIXME don't know if raising is a good idea in a callback
+        raise InvalidNativeValueError()
+        
+
 class ReceiveFutureData:
-    def __init__(self, future: asyncio.Future[DeviceEvent], device: DeviceHandle):
+    def __init__(self, future: asyncio.Future[DeviceEvent], device: Device):
         self.future = future
         self.device = device
 
@@ -584,7 +891,7 @@ def receive_cbk(native_res, user_data):
         
 
 class DisconnectFutureData:
-    def __init__(self, future: asyncio.Future[None], device: DeviceHandle):
+    def __init__(self, future: asyncio.Future[None], device: Device):
         self.future = future
         self.device = device
 
@@ -607,7 +914,7 @@ def disconnect_cbk(native_res, user_data):
         
 
 class ConnectFutureData:
-    def __init__(self, future: asyncio.Future[Device], device: DeviceHandle, loop_data: HandleEventsFutureData):
+    def __init__(self, future: asyncio.Future[Device], device: Device, loop_data: HandleEventsFutureData):
         self.future = future
         self.device = device
         self.loop_data = loop_data
@@ -648,7 +955,7 @@ def connect_cbk(native_result, user_data):
 
 
 class HandleEventsFutureData:
-    def __init__(self, future: asyncio.Future[None], device: DeviceHandle):
+    def __init__(self, future: asyncio.Future[None], device: Device):
         self.future = future
         self.device = device
 
@@ -686,7 +993,7 @@ async def wait_handle_events(handle_events_future):
 async def main():
     config = DeviceConfig(
         device_id="DayugqhpTPi2RgkELFPj9Q",
-        cred_secr="HBUDjQja7Ap0GmgIoZjGYqltCy89B+VmlgvSmoFOte0=",
+        cred_secr="SOnybEIx906lTxT7uaHh9K6zQ7dWBWb0mXwmwvO6Q1k=",
         realm="test",
         pairing_url="http://api.astarte.localhost/pairing",
         interfaces_dir="test_binding/interfaces",
@@ -699,6 +1006,17 @@ async def main():
     asyncio.create_task(wait_handle_events(handle_events_future))
 
     print(device)
+
+    # TODO add function to await for complete connection
+    # it is counter intuitive that after the connect we are disconnected 
+    # maybe change method name to build
+    await asyncio.sleep(2)
+
+    await device.send_individual("org.astarte-platform.rust.e2etest.DeviceDatastream",
+                                 "/doublearray_endpoint",
+                                 DeviceDataDoubleArray.from_array(array.array("d", [1.0, 1.1, 1.2, 1.3, 1.4])),
+                                 datetime.datetime.now()
+                             )
 
     event = await device.receive_data()
     print(event.interface)

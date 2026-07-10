@@ -1,5 +1,5 @@
 use std::{
-    ffi::NulError,
+    ffi::{CString, NulError},
     mem,
     ptr::NonNull,
     str::FromStr,
@@ -25,14 +25,13 @@ use tokio::{
     runtime::Runtime,
     task::{self, JoinHandle},
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use url::Url;
 
 use crate::{
-    BorrowAsRust, BorrowCRepr, CCompatibleType, DeviceHandleConnectCallback,
-    DeviceHandleLoopCallback, NativeStringResult, UserData,
+    BorrowAsRust,
     config::{DeviceConfig, NativeDeviceConfig},
-    data::{NativeDeviceData, NativeDeviceEvent},
+    data::{IndividualSend, NativeIndividualSend},
 };
 
 #[repr(C)]
@@ -49,12 +48,6 @@ unsafe impl Send for NativeDeviceHandle {}
 impl NativeDeviceHandle {
     pub fn new(opaque: *mut OpaqueDeviceHadle) -> Self {
         Self(opaque)
-    }
-}
-
-impl CCompatibleType<NativeDeviceHandle> for NativeDeviceHandle {
-    fn as_c_compat(input: NativeDeviceHandle) -> Result<Self, std::ffi::NulError> {
-        Ok(input)
     }
 }
 
@@ -79,8 +72,10 @@ impl CDrop for NativeDeviceHandle {
 impl CReprOf<Box<DeviceHandle>> for NativeDeviceHandle {
     fn c_repr_of(input: Box<DeviceHandle>) -> Result<Self, ffi_convert::CReprOfError> {
         let raw = Box::into_raw(input);
+        // SAFETY we transmute it back to a DeviceHandle pointer
+        let opaque = unsafe { mem::transmute(raw) };
 
-        Ok(Self(unsafe { mem::transmute(raw) }))
+        Ok(Self(opaque))
     }
 }
 
@@ -88,6 +83,7 @@ impl CReprOf<Box<DeviceHandle>> for NativeDeviceHandle {
 // NOTE this is unsafe since we don't know who is currently accessing the handle
 impl AsRust<Box<DeviceHandle>> for NativeDeviceHandle {
     fn as_rust(&self) -> Result<Box<DeviceHandle>, ffi_convert::AsRustError> {
+        // SAFETY we transmute it back to a DeviceHandle pointer
         let concrete: *mut DeviceHandle = unsafe { mem::transmute(self.0) };
         let owned = unsafe { Box::from_raw(concrete) };
 
@@ -97,16 +93,11 @@ impl AsRust<Box<DeviceHandle>> for NativeDeviceHandle {
 
 impl BorrowAsRust<DeviceHandle> for NativeDeviceHandle {
     fn borrow_as_rust<'a>(self) -> Result<&'a DeviceHandle, UnexpectedNullPointerError> {
-        let ptr = NonNull::new(self.0);
+        // SAFETY we transmute it back to a DeviceHandle pointer
+        let ptr = NonNull::new(self.0).ok_or(UnexpectedNullPointerError)?;
         let ptr: NonNull<DeviceHandle> = unsafe { mem::transmute(ptr) };
 
         Ok(unsafe { ptr.as_ref() })
-    }
-}
-
-impl BorrowCRepr<NativeDeviceHandle> for NativeDeviceHandle {
-    fn borrow_raw(input: &NativeDeviceHandle) -> Self {
-        *input
     }
 }
 
@@ -282,6 +273,89 @@ impl DeviceHandle {
         });
     }
 
+    pub fn send_individual<F>(
+        handle: NativeDeviceHandle,
+        send_data: *const NativeIndividualSend,
+        sent: F,
+    ) where
+        F: FnOnce(eyre::Result<()>) + Send + 'static,
+    {
+        let guard = handle
+            .borrow_as_rust()
+            .wrap_err("can't borrow device")
+            .and_then(|h| h.inner_ref());
+
+        let guard = match guard {
+            Ok(g) => g,
+            Err(e) => {
+                sent(Err(e));
+                return;
+            }
+        };
+
+        let inner = match guard.as_ref().ok_or(eyre!("already disconnected")) {
+            Ok(i) => i,
+            Err(e) => {
+                sent(Err(e));
+                return;
+            }
+        };
+
+        let InnerDeviceData { rt, client, .. } = inner;
+
+        let send_data = unsafe {
+            send_data
+                .as_ref()
+                .ok_or_eyre("send data is required to be non null and valid")
+        };
+        let send_data = match send_data {
+            Ok(s) => s,
+            Err(e) => {
+                error!(%e, "data reference error");
+                sent(Err(e));
+                return;
+            }
+        };
+
+        // NOTE this clones the data
+        let send_data = match send_data
+            .as_rust()
+            .wrap_err("error in c to rust conversion")
+        {
+            Ok(i) => i,
+            Err(error) => {
+                error!(%error, "conversion errror");
+                sent(Err(error));
+                return;
+            }
+        };
+
+        debug!(?send_data, "individual data received");
+
+        let mut client = client.clone();
+
+        rt.spawn(async move {
+            let IndividualSend {
+                interface,
+                path,
+                data,
+                timestamp,
+            } = send_data;
+
+            let result = if let Some(timestamp) = timestamp {
+                client
+                    .send_individual_with_timestamp(&interface, &path, data, timestamp)
+                    .await
+            } else {
+                client.send_individual(&interface, &path, data).await
+            };
+
+            info!(?result, "individual data sent");
+
+            sent(result.wrap_err("error while sending individual"));
+        });
+    }
+
     // fn send_data(handle: NativeDeviceHandle) {
     //     let handle = handle.borrow_as_rust().wrap_err("can't borrow device")?;
     // }
@@ -342,9 +416,7 @@ impl DeviceHandle {
         write.take().ok_or_eyre("already disconnected")
     }
 
-    // FIXME currently this is not dropping the box but i think i can't safely do it
-    // maybe i need to use an arc so that access from more than one thread are allowed
-    // blocking disconnect function
+    // this does not free the handle that has to be freed after using [`free`]
     pub fn disconnect(handle: NativeDeviceHandle) -> eyre::Result<()> {
         let inner = Self::into_inner(handle)?;
 
@@ -399,6 +471,13 @@ impl DeviceHandle {
         rt.shutdown_background();
 
         result
+    }
+
+    pub fn free(handle: NativeDeviceHandle) -> eyre::Result<()> {
+        handle
+            .as_rust()
+            .map(drop)
+            .wrap_err("error while dropping handle")
     }
 }
 

@@ -1,7 +1,54 @@
-use std::ffi::{CString, c_char};
+use std::ffi::{CStr, CString, c_char};
 
-use astarte_device_sdk::{AstarteData, DeviceEvent, Value};
-use ffi_convert::{CArray, CDrop, CReprOf, CStringArray};
+use astarte_device_sdk::{
+    AstarteData, DeviceEvent, Value,
+    chrono::{DateTime, Utc},
+    types::Double,
+};
+use ffi_convert::{AsRust, AsRustError, CArray, CDrop, CReprOf, CStringArray};
+
+use crate::{BorrowAsRust, NativeOption};
+
+#[repr(transparent)]
+#[derive(Clone, Debug)]
+pub struct NativeTimestamp(i64);
+
+impl AsRust<DateTime<Utc>> for NativeTimestamp {
+    fn as_rust(&self) -> Result<DateTime<Utc>, ffi_convert::AsRustError> {
+        DateTime::from_timestamp_millis(self.0)
+            .ok_or(AsRustError::Other("can't convert timestamp".into()))
+    }
+}
+
+impl CDrop for NativeTimestamp {
+    fn do_drop(&mut self) -> Result<(), ffi_convert::CDropError> {
+        Ok(())
+    }
+}
+
+impl CReprOf<DateTime<Utc>> for NativeTimestamp {
+    fn c_repr_of(input: DateTime<Utc>) -> Result<Self, ffi_convert::CReprOfError> {
+        Ok(Self(input.timestamp_millis()))
+    }
+}
+
+#[repr(C)]
+#[derive(AsRust, Debug)]
+#[target_type(IndividualSend)]
+pub struct NativeIndividualSend {
+    pub interface: *const c_char,
+    pub path: *const c_char,
+    pub data: NativeDeviceData,
+    pub timestamp: NativeOption<NativeTimestamp>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IndividualSend {
+    pub interface: String,
+    pub path: String,
+    pub data: AstarteData,
+    pub timestamp: Option<DateTime<Utc>>,
+}
 
 /*
  * NOTE by using ffi_convert you should copy data when converting to rust and to ffi compatible structs
@@ -9,7 +56,6 @@ use ffi_convert::{CArray, CDrop, CReprOf, CStringArray};
  * handled by the calling language
  */
 
-// ~~FIXME~~ this is actually the correct behaviour drop is called by rust for every sub object cool the CDrop derive does not call c_drop of underlying structs it seems so this need to be manual
 #[repr(C)]
 #[derive(CReprOf, CDrop, Debug)]
 #[target_type(DeviceEvent)]
@@ -69,8 +115,6 @@ impl CReprOf<(String, AstarteData)> for NativeObjectEntry {
     }
 }
 
-// FIXME the CDrop implementation does not work for enum with fields
-// so implement manually
 #[repr(C)]
 #[derive(CDrop, Debug)]
 pub enum NativeDeviceData {
@@ -80,36 +124,56 @@ pub enum NativeDeviceData {
     LongInteger(i64),
     String(*const c_char),
     BinaryBlob(CArray<u8>),
-    DateTime(i64),
+    DateTime(NativeTimestamp),
     DoubleArray(CArray<f64>),
     IntegerArray(CArray<i32>),
     BooleanArray(CArray<bool>),
     LongIntegerArray(CArray<i64>),
     StringArray(CStringArray),
     BinaryBlobArray(CArray<CArray<u8>>),
-    DateTimeArray(CArray<i64>),
+    DateTimeArray(CArray<NativeTimestamp>),
 }
 
-// impl CDrop for NativeDeviceData {
-//     fn do_drop(&mut self) -> Result<(), ffi_convert::CDropError> {
-//         match self {
-//             Self::Double(_) => Ok(()),
-//             Self::Integer(_) => Ok(()),
-//             Self::Boolean(_) => Ok(()),
-//             Self::LongInteger(_) => Ok(()),
-//             Self::String(s) => s.do_drop(),
-//             Self::BinaryBlob(b) => b.do_drop(),
-//             Self::DateTime(_) => Ok(()),
-//             Self::DoubleArray(a) => a.do_drop(),
-//             Self::IntegerArray(a) => a.do_drop(),
-//             Self::BooleanArray(a) => a.do_drop(),
-//             Self::LongIntegerArray(a) => a.do_drop(),
-//             Self::StringArray(a) => a.do_drop(),
-//             Self::BinaryBlobArray(a) => a.do_drop(),
-//             Self::DateTimeArray(a) => a.do_drop(),
-//         }
-//     }
-// }
+impl AsRust<AstarteData> for NativeDeviceData {
+    fn as_rust(&self) -> Result<AstarteData, AsRustError> {
+        let native = match self {
+            NativeDeviceData::Double(double) => AstarteData::Double(
+                Double::try_from(*double)
+                    .map_err(|_| AsRustError::Other("invalid double value".into()))?,
+            ),
+            NativeDeviceData::Integer(integer) => AstarteData::Integer(*integer),
+            NativeDeviceData::Boolean(boolean) => AstarteData::Boolean(*boolean),
+            NativeDeviceData::LongInteger(long_integer) => AstarteData::LongInteger(*long_integer),
+            NativeDeviceData::String(string) => {
+                AstarteData::String(unsafe { CStr::from_ptr(*string) }.as_rust()?)
+            }
+            NativeDeviceData::BinaryBlob(blob) => AstarteData::BinaryBlob(blob.as_rust()?),
+            NativeDeviceData::DateTime(date_time) => AstarteData::DateTime(date_time.as_rust()?),
+            NativeDeviceData::DoubleArray(doubles) => {
+                let vec: Vec<f64> = doubles.as_rust()?;
+                let doubles = vec
+                    .into_iter()
+                    .map(|d| Double::try_from(d))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| AsRustError::Other("invalid double value".into()))?;
+
+                AstarteData::DoubleArray(doubles)
+            }
+            NativeDeviceData::IntegerArray(items) => AstarteData::IntegerArray(items.as_rust()?),
+            NativeDeviceData::BooleanArray(items) => AstarteData::BooleanArray(items.as_rust()?),
+            NativeDeviceData::LongIntegerArray(items) => {
+                AstarteData::LongIntegerArray(items.as_rust()?)
+            }
+            NativeDeviceData::StringArray(items) => AstarteData::StringArray(items.as_rust()?),
+            NativeDeviceData::BinaryBlobArray(items) => {
+                AstarteData::BinaryBlobArray(items.as_rust()?)
+            }
+            NativeDeviceData::DateTimeArray(items) => AstarteData::DateTimeArray(items.as_rust()?),
+        };
+
+        Ok(native)
+    }
+}
 
 impl CReprOf<AstarteData> for NativeDeviceData {
     fn c_repr_of(input: AstarteData) -> Result<Self, ffi_convert::CReprOfError> {
@@ -120,7 +184,9 @@ impl CReprOf<AstarteData> for NativeDeviceData {
             AstarteData::LongInteger(long_integer) => Self::LongInteger(long_integer),
             AstarteData::String(string) => Self::String(CString::c_repr_of(string)?.into_raw()),
             AstarteData::BinaryBlob(items) => Self::BinaryBlob(CArray::c_repr_of(items)?),
-            AstarteData::DateTime(date_time) => Self::DateTime(date_time.timestamp_millis()),
+            AstarteData::DateTime(date_time) => {
+                Self::DateTime(NativeTimestamp::c_repr_of(date_time)?)
+            }
             AstarteData::DoubleArray(doubles) => {
                 // NOTE if allowed by the orphan rule create from impl in sdk main crate
                 // SAFETY: [`Double`] is repr(transparent) and contains an f64
@@ -135,12 +201,9 @@ impl CReprOf<AstarteData> for NativeDeviceData {
             }
             AstarteData::StringArray(items) => Self::StringArray(CStringArray::c_repr_of(items)?),
             AstarteData::BinaryBlobArray(items) => Self::BinaryBlobArray(CArray::c_repr_of(items)?),
-            AstarteData::DateTimeArray(date_times) => Self::DateTimeArray(CArray::c_repr_of(
-                date_times
-                    .iter()
-                    .map(|dt| dt.timestamp_millis())
-                    .collect::<Vec<_>>(),
-            )?),
+            AstarteData::DateTimeArray(date_times) => {
+                Self::DateTimeArray(CArray::c_repr_of(date_times)?)
+            }
         };
 
         Ok(native)

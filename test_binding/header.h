@@ -103,6 +103,8 @@ typedef struct CArray_u8 {
   uintptr_t size;
 } CArray_u8;
 
+typedef int64_t NativeTimestamp;
+
 /**
  * A utility type to represent arrays of the parametrized type.
  * Note that the parametrized type should have a C-compatible representation.
@@ -320,6 +322,45 @@ typedef struct CArray_CArray_u8 {
   uintptr_t size;
 } CArray_CArray_u8;
 
+/**
+ * A utility type to represent arrays of the parametrized type.
+ * Note that the parametrized type should have a C-compatible representation.
+ *
+ * # Example
+ *
+ * ```
+ * use ffi_convert::{CReprOf, AsRust, CDrop, CArray};
+ * use libc::c_char;
+ *
+ * pub struct PizzaTopping {
+ *     pub ingredient: String,
+ * }
+ *
+ * #[derive(CDrop, CReprOf, AsRust)]
+ * #[target_type(PizzaTopping)]
+ * pub struct CPizzaTopping {
+ *     pub ingredient: *const c_char
+ * }
+ *
+ * let toppings = vec![
+ *         PizzaTopping { ingredient: "Cheese".to_string() },
+ *         PizzaTopping { ingredient: "Ham".to_string() } ];
+ *
+ * let ctoppings = CArray::<CPizzaTopping>::c_repr_of(toppings);
+ *
+ * ```
+ */
+typedef struct CArray_NativeTimestamp {
+  /**
+   * Pointer to the first element of the array
+   */
+  const NativeTimestamp *data_ptr;
+  /**
+   * Number of elements in the array
+   */
+  uintptr_t size;
+} CArray_NativeTimestamp;
+
 typedef enum NativeDeviceData_Tag {
   Double,
   Integer,
@@ -359,7 +400,7 @@ typedef struct NativeDeviceData {
       struct CArray_u8 binary_blob;
     };
     struct {
-      int64_t date_time;
+      NativeTimestamp date_time;
     };
     struct {
       struct CArray_f64 double_array;
@@ -380,7 +421,7 @@ typedef struct NativeDeviceData {
       struct CArray_CArray_u8 binary_blob_array;
     };
     struct {
-      struct CArray_i64 date_time_array;
+      struct CArray_NativeTimestamp date_time_array;
     };
   };
 } NativeDeviceData;
@@ -485,13 +526,37 @@ typedef struct NativeStringResult_NativeManuallyDrop_NativeDeviceEvent {
 typedef void (*DeviceHandleReceiveCallback)(const struct NativeStringResult_NativeManuallyDrop_NativeDeviceEvent *result,
                                             UserData user_data);
 
-void test_free(void);
+typedef enum NativeOption_NativeTimestamp_Tag {
+  Some_NativeTimestamp,
+  None_NativeTimestamp,
+} NativeOption_NativeTimestamp_Tag;
+
+typedef struct NativeOption_NativeTimestamp {
+  NativeOption_NativeTimestamp_Tag tag;
+  union {
+    struct {
+      NativeTimestamp some;
+    };
+  };
+} NativeOption_NativeTimestamp;
+
+typedef struct NativeIndividualSend {
+  const char *interface;
+  const char *path;
+  struct NativeDeviceData data;
+  struct NativeOption_NativeTimestamp timestamp;
+} NativeIndividualSend;
+
+typedef void (*DeviceHandleSendCallback)(const struct NativeStringResult_bool *result,
+                                         UserData user_data);
 
 void device_handle_connect(struct NativeDeviceConfig config,
                            DeviceHandleConnectCallback connect_cbk,
                            UserData connect_user_data,
                            DeviceHandleLoopCallback loop_cbk,
                            UserData loop_user_data);
+
+void device_handle_free(NativeDeviceHandle handle);
 
 void device_handle_disconnect(NativeDeviceHandle handle,
                               DeviceHandleDisconnectCallback disconnect_cbk,
@@ -502,3 +567,8 @@ void device_client_receive(NativeDeviceHandle device_handle,
                            UserData user_data);
 
 void device_client_free_device_event(struct NativeDeviceEvent event);
+
+void device_client_send_individual(NativeDeviceHandle device_handle,
+                                   const struct NativeIndividualSend *data,
+                                   DeviceHandleSendCallback callback,
+                                   UserData user_data);
