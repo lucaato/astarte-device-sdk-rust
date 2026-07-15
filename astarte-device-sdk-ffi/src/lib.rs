@@ -12,7 +12,7 @@ use tracing::{error, info, level_filters::LevelFilter};
 
 use crate::{
     config::NativeDeviceConfig,
-    data::{NativeDeviceData, NativeDeviceEvent, NativeIndividualSend},
+    data::{NativeDeviceData, NativeDeviceEvent, NativeIndividualSend, NativeObjectSend},
     device::{DeviceHandle, NativeDeviceHandle, OpaqueDeviceHadle},
 };
 
@@ -132,7 +132,7 @@ impl<T, U: CDrop + CReprOf<T>> CReprOf<eyre::Result<T>> for NativeStringResult<U
         let native = match input {
             Ok(o) => Self::Ok(U::c_repr_of(o)?),
             Err(e) => {
-                let report_string = format!("{e:#}");
+                let report_string = format!("{e:?}");
 
                 Self::Err(StaticString::c_repr_of(report_string)?)
             }
@@ -181,6 +181,11 @@ pub type DeviceHandleLoopCallback =
 
 //     println!("{:?}", string_res);
 // }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn device_handle_init() ->  {
+    
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn device_handle_connect(
@@ -286,4 +291,20 @@ pub extern "C" fn device_client_send_individual(
     };
 
     DeviceHandle::send_individual(device_handle, data, cbk);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn device_client_send_object(
+    device_handle: NativeDeviceHandle,
+    data: *const NativeObjectSend,
+    callback: DeviceHandleSendCallback,
+    user_data: UserData,
+) {
+    let cbk = move |res: eyre::Result<()>| {
+        let c_res = NativeStringResult::c_repr_of(res.map(|_| true)).unwrap();
+
+        callback(&c_res, user_data);
+    };
+
+    DeviceHandle::send_object(device_handle, data, cbk);
 }

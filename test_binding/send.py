@@ -74,9 +74,9 @@ class DeviceBinaryBlob:
 
     def to_cdata(self) -> FFI.CData:
         # this keeps a reference to event so no data is freed until this buffer goes out of scope
-        buffer = ffi.from_buffer("uint8_t *", self)
+        buffer = ffi.from_buffer("uint8_t[]", self)
 
-        native = ffi.new("CArray_u8")
+        native = ffi.new("CArray_u8 *")
         native.data_ptr = buffer
         native.size = len(buffer)
         return native
@@ -252,12 +252,12 @@ class DeviceDataString(DeviceData):
 
     @staticmethod
     def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataString:
-        string = ffi.string(value.string).decode("utf-8")
+        string = ffi.string(value.string).decode()
 
         return DeviceDataString(string)
 
     def to_cdata(self) -> FFI.CData:
-        string = ffi.new("char *", self._value);
+        string = ffi.new("char[]", self._value.encode());
 
         native = ffi.new("NativeDeviceData *")
         native.tag = _get_lib().String
@@ -281,7 +281,7 @@ class DeviceDataBinaryBlob(DeviceData):
     def to_cdata(self) -> FFI.CData:
         native = ffi.new("NativeDeviceData *")
         native.tag = _get_lib().BinaryBlob
-        native.binary_blob = self._value.to_cdata()
+        native.binary_blob = self._value.to_cdata()[0]
         return native
 
     def as_value(self) -> DeviceBinaryBlob:
@@ -324,7 +324,7 @@ class DeviceDataDoubleArray(DeviceData):
 
         # NOTE Store reference to parent event to prevent use-after-free this type does not copy
         self._event = event
-        self._view = view.toreadonly()
+        self._view: memoryview[float] = view.toreadonly() # type: ignore
 
     @staticmethod
     def from_array(arr: array.array) -> DeviceDataDoubleArray:
@@ -426,7 +426,8 @@ class DeviceDataBooleanArray(DeviceData):
 
     @staticmethod
     def from_list(bools: list[bool]) -> DeviceDataBooleanArray:
-        buffer = ffi.buffer("bool[]", bools)
+        native_bools = ffi.new("bool[]", bools)
+        buffer = ffi.buffer(native_bools)
         view = memoryview(buffer).cast("?")
 
         return DeviceDataBooleanArray(view)
@@ -511,12 +512,12 @@ class DeviceDataStringArray(DeviceData):
         ptr = value.string_array.data
         len = value.string_array.size
 
-        strings = [ffi.string(ptr[i]).decode("utf-8") for i in range(len)]
+        strings = [ffi.string(ptr[i]).decode() for i in range(len)]
 
         return DeviceDataStringArray(strings)
 
     def to_cdata(self) -> FFI.CData:
-        cdata_list = [ffi.new("char[]", s.encode("utf-8")) for s in self._strings]
+        cdata_list = [ffi.new("char[]", s.encode()) for s in self._strings]
         native_strings = ffi.new("char*[]", cdata_list)
 
         native = ffi.new("NativeDeviceData *")
@@ -549,7 +550,7 @@ class DeviceDataBinaryBlobArray(DeviceData, Iterable[DeviceBinaryBlob]):
         return DeviceDataBinaryBlobArray(blobs)
 
     def to_cdata(self) -> FFI.CData:
-        cdata_list = [b.to_cdata() for b in self._blobs]
+        cdata_list = [b.to_cdata()[0] for b in self._blobs]
         native_blobs = ffi.new("struct CArray_u8[]", cdata_list)
 
         native = ffi.new("NativeDeviceData *")
@@ -573,6 +574,7 @@ class DeviceDataDateTimeArray(DeviceData):
         # NOTE Store reference to parent event to prevent use-after-free this type does not copy (it copies when an item is requested)
         self._datetimes = datetimes
 
+    @staticmethod
     def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceDataDateTimeArray:
         data = value.date_time_array.data_ptr
         len: int = value.date_time_array.size
@@ -601,11 +603,48 @@ class DeviceDataDateTimeArray(DeviceData):
         self._datetimes.__iter__()
 
 
+class DeviceObject:
+    def __init__(self, data: dict[str, DeviceData]):
+        self.data = MappingProxyType(data)
+
+    @staticmethod
+    def from_cdata(entries: FFI.CData, event: DeviceEvent | None = None) -> DeviceObject:
+        map = {}
+        len = entries.size
+
+        for i in range(0, len):
+            c_entry = entries.data_ptr[i]
+
+            path = ffi.string(c_entry.path).decode()
+            value = DeviceData.from_cdata(c_entry.value, event)
+
+            map[path] = value
+
+        return DeviceObject(map)
+
+    def to_cdata(self) -> FFI.CData:
+        entries = []
+
+        for path, data in self.data.items():
+            print(f"item ({path} and {data})")
+
+            c_path = ffi.new("char[]", path.encode())
+            c_data = data.to_cdata()
+
+            entry = ffi.new("NativeObjectEntry *")
+            entry.path = c_path
+            entry.value = c_data[0]
+
+            entries.append(entry[0])
+
+        object = ffi.new("CArray_NativeObjectEntry *")
+        object.data_ptr = ffi.new("NativeObjectEntry[]", entries)
+        object.size = len(entries)
+
+        return object
+
 class DeviceValue(ABC):
     """Abstract base class for DeviceValue variants."""
-    def __init__(self, event: DeviceEvent | None = None):
-        # Store reference to parent event to prevent use-after-free
-        self._event = event
     
     @staticmethod
     def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceValue:
@@ -613,22 +652,41 @@ class DeviceValue(ABC):
         lib = _get_lib()
         
         if tag == lib.Individual:
-            return DeviceValueIndividual(value.individual, event)
+            return DeviceValueIndividual.from_cdata(value, event)
         elif tag == lib.Object:
-            return DeviceValueObject(value.object, event)
+            return DeviceValueObject.from_cdata(value, event)
         elif tag == lib.PropertySet:
-            return DeviceValuePropertySet(value.property_set, event)
+            return DeviceValuePropertySet.from_cdata(value, event)
         elif tag == lib.PropertyUnset:
-            return DeviceValuePropertyUnset(event)
+            return DeviceValuePropertyUnset.from_cdata(value)
         else:
             raise InvalidNativeValueError(f"Unknown DeviceValue tag: {tag}")
 
 
 class DeviceValueIndividual(DeviceValue):
-    def __init__(self, value: FFI.CData, event: DeviceEvent | None = None):
-        super().__init__(event)
-        self._data = DeviceData.from_cdata(value.data, event)
-        self._timestamp = datetime.datetime.fromtimestamp(value.timestamp / 1000.0)
+    def __init__(self, data: DeviceData, timestamp: datetime.datetime):
+        self._data = data
+        self._timestamp = timestamp
+
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceValueIndividual:
+        data = DeviceData.from_cdata(value.individual.data, event)
+        timestamp = datetime.datetime.fromtimestamp(value.individual.timestamp / 1000.0)
+        return DeviceValueIndividual(data, timestamp)
+
+    def to_cdata(self) -> FFI.CData:
+        value = ffi.new("NativeValue *")
+        data = self._data.to_cdata()
+        timestamp = int(self._timestamp.timestamp() * 1000)
+
+        individual_body = ffi.new("Individual_Body")
+        individual_body.data = data[0]
+        individual_body.timestamp = timestamp
+
+        value.tag = _get_lib().Individual
+        value.individual = individual_body
+
+        return value
 
     @property
     def data(self) -> DeviceData:
@@ -640,25 +698,31 @@ class DeviceValueIndividual(DeviceValue):
 
 
 class DeviceValueObject(DeviceValue):
-    def __init__(self, value: FFI.CData, event: DeviceEvent | None = None):
-        super().__init__(event)
-        self._data = self.__data_to_map(value.data, event)
-        self._timestamp = datetime.datetime.fromtimestamp(value.timestamp / 1000.0)
+    def __init__(self, data: DeviceObject, timestamp: datetime.datetime):
+        self._data = data
+        self._timestamp = timestamp
 
-    def __entry_tuple(self, entry: FFI.CData, event: DeviceEvent | None = None) -> tuple[str, DeviceData]:
-        path = ffi.string(entry.path).decode("utf-8")
-        value = DeviceData.from_cdata(entry.value, event)
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceValueObject:
+        object = DeviceObject.from_cdata(value.object.data, event)
+        timestamp = datetime.datetime.fromtimestamp(value.object.timestamp / 1000.0)
 
-        return (path, value)
+        return DeviceValueObject(object, timestamp)
 
-    def __data_to_map(self, entries: FFI.CData, event: DeviceEvent | None = None) -> MappingProxyType[str, DeviceData]:
-        map = {}
+    def to_cdata(self) -> FFI.CData:
+        value = ffi.new("NativeValue *")
 
-        for i in range(0, entries.size):
-            (path, value) = self.__entry_tuple(entries.data_ptr[i], event)
-            map[path] = value
+        data = self._data.to_cdata()
+        timestamp = int(self._timestamp.timestamp() * 1000)
 
-        return MappingProxyType(map)
+        object_body = ffi.new("Object_Body")
+        object_body.data = data
+        object_body.timestamp = timestamp
+
+        value.tag = _get_lib().Object
+        value.object = object_body
+
+        return value
 
     @property
     def data(self) -> MappingProxyType[str, DeviceData]:
@@ -670,9 +734,22 @@ class DeviceValueObject(DeviceValue):
 
 
 class DeviceValuePropertySet(DeviceValue):
-    def __init__(self, value: FFI.CData, event: DeviceEvent | None = None):
-        super().__init__(event)
-        self._property = DeviceData.from_cdata(value, event)
+    def __init__(self, property: DeviceData):
+        self._property = property
+
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceValuePropertySet:
+        property = DeviceData.from_cdata(value.property_set, event)
+        return DeviceValuePropertySet(property)
+
+    def to_cdata(self) -> FFI.CData:
+        value = ffi.new("NativeValue *")
+        data = self._property.to_cdata()
+
+        value.tag = _get_lib().PropertySet
+        value.property_set = data[0]
+
+        return value
 
     @property
     def property(self) -> DeviceData:
@@ -680,9 +757,19 @@ class DeviceValuePropertySet(DeviceValue):
 
 
 class DeviceValuePropertyUnset(DeviceValue):
-    def __init__(self, event: DeviceEvent | None = None):
-        super().__init__(event)
+    def __init__(self):
+        pass
 
+    @staticmethod
+    def from_cdata(value: FFI.CData, event: DeviceEvent | None = None) -> DeviceValuePropertyUnset:
+        return DeviceValuePropertyUnset()
+
+    def to_cdata(self) -> FFI.CData:
+        value = ffi.new("NativeValue *")
+
+        value.tag = _get_lib().PropertyUnset
+
+        return value
 
 # ==========================================
 # DeviceEvent
@@ -693,8 +780,8 @@ class DeviceEvent:
         # Tie the C-allocation lifecycle to this object
         self._ptr = ffi.gc(ok_data, _get_lib().device_client_free_device_event)
 
-        self._interface = ffi.string(self._ptr.interface).decode("utf-8")
-        self._path = ffi.string(self._ptr.path).decode("utf-8")
+        self._interface = ffi.string(self._ptr.interface).decode()
+        self._path = ffi.string(self._ptr.path).decode()
         self._data = DeviceValue.from_cdata(self._ptr.data, self)
 
     @property
@@ -835,6 +922,30 @@ class Device:
         return future
 
 
+    def send_object(self, interface: str, path: str, object: DeviceObject, timestamp: datetime.datetime | None = None) -> asyncio.Future[None]:
+        interface_cstr = ffi.new("char[]", interface.encode())
+        path_cstr = ffi.new("char[]", path.encode())
+        object_c = object.to_cdata()[0]
+
+        object_data = ffi.new("NativeObjectSend *")
+        object_data.interface = interface_cstr
+        object_data.path = path_cstr
+        object_data.data = object_c
+        if timestamp is None:
+            object_data.timestamp.tag = _get_lib().None_NativeTimestamp
+        else:
+            object_data.timestamp.tag = _get_lib().Some_NativeTimestamp
+            object_data.timestamp.some = int(timestamp.timestamp() * 1000.0)
+
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        handle = self.ffi_handle(SendFutureData(future, self))
+
+        _get_lib().device_client_send_object(self._ptr, object_data, send_cbk, handle)
+
+        return future
+
+
 class InvalidNativeValueError(Exception):
     pass
 
@@ -855,7 +966,7 @@ def send_cbk(native_res, user_data):
     if native_res.tag == _get_lib().Ok_bool:
         data.future.get_loop().call_soon_threadsafe(data.future.set_result, None)
     elif native_res.tag == _get_lib().Err_bool:
-        error_str = ffi.string(native_res.err, 1024).decode("utf-8")
+        error_str = ffi.string(native_res.err, 1024).decode()
         error = SendError(error_str)
         data.future.get_loop().call_soon_threadsafe(data.future.set_exception, error)
     else:
@@ -882,7 +993,7 @@ def receive_cbk(native_res, user_data):
 
         data.future.get_loop().call_soon_threadsafe(data.future.set_result, event)
     elif native_res.tag == _get_lib().Err_NativeManuallyDrop_NativeDeviceEvent:
-        error_str = ffi.string(native_res.err, 1024).decode("utf-8")
+        error_str = ffi.string(native_res.err, 1024).decode()
         error = ReceiveError(error_str)
         data.future.get_loop().call_soon_threadsafe(data.future.set_exception, error)
     else:
@@ -905,7 +1016,7 @@ def disconnect_cbk(native_res, user_data):
     if native_res.tag == _get_lib().Ok_bool:
         data.future.get_loop().call_soon_threadsafe(data.future.set_result, None)
     elif native_res.tag == _get_lib().Err_bool:
-        error_str = ffi.string(native_res.err, 1024).decode("utf-8")
+        error_str = ffi.string(native_res.err, 1024).decode()
         loop_error = DisconnectError(error_str)
         data.future.get_loop().call_soon_threadsafe(data.future.set_exception, loop_error)
     else:
@@ -937,7 +1048,7 @@ def connect_cbk(native_result, user_data):
 
         data.future.get_loop().call_soon_threadsafe(data.future.set_result, data.device)
     elif native_result.tag == _get_lib().Err_NativeDeviceHandle:
-        error_str = ffi.string(native_result.err, 1024).decode("utf-8")
+        error_str = ffi.string(native_result.err, 1024).decode()
         connect_error = ConnectError(error_str)
 
         # NOTE if the connect fail we force a fail in the loop callback too
@@ -969,7 +1080,7 @@ def loop_cbk(native_result, user_data):
     if native_result.tag == _get_lib().Ok_bool:
         data.future.get_loop().call_soon_threadsafe(data.future.set_result, None)
     elif native_result.tag == _get_lib().Err_bool:
-        error_str = ffi.string(native_result.err, 1024).decode("utf-8")
+        error_str = ffi.string(native_result.err, 1024).decode()
         loop_error = HandleEventsError(error_str)
         data.future.get_loop().call_soon_threadsafe(data.future.set_exception, loop_error)
     else:
@@ -1017,6 +1128,25 @@ async def main():
                                  DeviceDataDoubleArray.from_array(array.array("d", [1.0, 1.1, 1.2, 1.3, 1.4])),
                                  datetime.datetime.now()
                              )
+
+    object = DeviceObject({
+      "/double_endpoint": DeviceDataDouble(3.14),
+      "/integer_endpoint": DeviceDataInteger(1),
+      "/boolean_endpoint": DeviceDataBoolean(True),
+      "/longinteger_endpoint": DeviceDataLongInteger(1 << 32),
+      "/string_endpoint": DeviceDataString("hey"),
+      "/binaryblob_endpoint": DeviceDataBinaryBlob(DeviceBinaryBlob.from_bytes(b'tests')),
+      "/datetime_endpoint": DeviceDataDateTime(datetime.datetime.now()),
+      "/doublearray_endpoint": DeviceDataDoubleArray.from_array(array.array("d", [1.1, 1.2, 1.3])),
+      "/integerarray_endpoint": DeviceDataIntegerArray.from_array(array.array("i", [1, 2, 3])),
+      "/booleanarray_endpoint": DeviceDataBooleanArray.from_list([True, False, True]),
+      "/longintegerarray_endpoint": DeviceDataLongIntegerArray.from_array(array.array("q", [1 << 33, 1 << 34])),
+      "/stringarray_endpoint": DeviceDataStringArray(["a", "b", "c"]),
+      "/binaryblobarray_endpoint": DeviceDataBinaryBlobArray([DeviceBinaryBlob.from_bytes(b'blob1'), DeviceBinaryBlob.from_bytes(b'blob2')]),
+      "/datetimearray_endpoint": DeviceDataDateTimeArray([datetime.datetime.now(), datetime.datetime.now()]),
+   })
+
+    await device.send_object("org.astarte-platform.rust.e2etest.DeviceAggregate", "/test", object)
 
     event = await device.receive_data()
     print(event.interface)

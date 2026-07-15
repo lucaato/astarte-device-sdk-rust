@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString, c_char};
 
 use astarte_device_sdk::{
     AstarteData, DeviceEvent, Value,
+    aggregate::AstarteObject,
     chrono::{DateTime, Utc},
     types::Double,
 };
@@ -47,6 +48,39 @@ pub struct IndividualSend {
     pub interface: String,
     pub path: String,
     pub data: AstarteData,
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct NativeObjectSend {
+    pub interface: *const c_char,
+    pub path: *const c_char,
+    pub data: CArray<NativeObjectEntry>,
+    pub timestamp: NativeOption<NativeTimestamp>,
+}
+
+impl AsRust<ObjectSend> for NativeObjectSend {
+    fn as_rust(&self) -> Result<ObjectSend, AsRustError> {
+        let interface = unsafe { CStr::from_ptr(self.interface) }.as_rust()?;
+        let path = unsafe { CStr::from_ptr(self.path) }.as_rust()?;
+        let data = AstarteObject::from_iter(self.data.as_rust()?.into_iter());
+        let timestamp = self.timestamp.as_rust()?;
+
+        Ok(ObjectSend {
+            interface,
+            path,
+            data,
+            timestamp,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ObjectSend {
+    pub interface: String,
+    pub path: String,
+    pub data: AstarteObject,
     pub timestamp: Option<DateTime<Utc>>,
 }
 
@@ -112,6 +146,15 @@ impl CReprOf<(String, AstarteData)> for NativeObjectEntry {
         let value = NativeDeviceData::c_repr_of(data)?;
 
         Ok(Self { path, value })
+    }
+}
+
+impl AsRust<(String, AstarteData)> for NativeObjectEntry {
+    fn as_rust(&self) -> Result<(String, AstarteData), AsRustError> {
+        let path = unsafe { CStr::from_ptr(self.path) }.as_rust()?;
+        let value = self.value.as_rust()?;
+
+        Ok((path, value))
     }
 }
 

@@ -550,6 +550,13 @@ typedef struct NativeIndividualSend {
 typedef void (*DeviceHandleSendCallback)(const struct NativeStringResult_bool *result,
                                          UserData user_data);
 
+typedef struct NativeObjectSend {
+  const char *interface;
+  const char *path;
+  struct CArray_NativeObjectEntry data;
+  struct NativeOption_NativeTimestamp timestamp;
+} NativeObjectSend;
+
 void device_handle_connect(struct NativeDeviceConfig config,
                            DeviceHandleConnectCallback connect_cbk,
                            UserData connect_user_data,
@@ -572,3 +579,8 @@ void device_client_send_individual(NativeDeviceHandle device_handle,
                                    const struct NativeIndividualSend *data,
                                    DeviceHandleSendCallback callback,
                                    UserData user_data);
+
+void device_client_send_object(NativeDeviceHandle device_handle,
+                               const struct NativeObjectSend *data,
+                               DeviceHandleSendCallback callback,
+                               UserData user_data);

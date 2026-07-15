@@ -31,7 +31,7 @@ use url::Url;
 use crate::{
     BorrowAsRust,
     config::{DeviceConfig, NativeDeviceConfig},
-    data::{IndividualSend, NativeIndividualSend},
+    data::{IndividualSend, NativeIndividualSend, NativeObjectSend, ObjectSend},
 };
 
 #[repr(C)]
@@ -353,6 +353,86 @@ impl DeviceHandle {
             info!(?result, "individual data sent");
 
             sent(result.wrap_err("error while sending individual"));
+        });
+    }
+
+    pub fn send_object<F>(handle: NativeDeviceHandle, send_data: *const NativeObjectSend, sent: F)
+    where
+        F: FnOnce(eyre::Result<()>) + Send + 'static,
+    {
+        let guard = handle
+            .borrow_as_rust()
+            .wrap_err("can't borrow device")
+            .and_then(|h| h.inner_ref());
+
+        let guard = match guard {
+            Ok(g) => g,
+            Err(e) => {
+                sent(Err(e));
+                return;
+            }
+        };
+
+        let inner = match guard.as_ref().ok_or(eyre!("already disconnected")) {
+            Ok(i) => i,
+            Err(e) => {
+                sent(Err(e));
+                return;
+            }
+        };
+
+        let InnerDeviceData { rt, client, .. } = inner;
+
+        let send_data = unsafe {
+            send_data
+                .as_ref()
+                .ok_or_eyre("send data is required to be non null and valid")
+        };
+        let send_data = match send_data {
+            Ok(s) => s,
+            Err(e) => {
+                error!(%e, "data reference error");
+                sent(Err(e));
+                return;
+            }
+        };
+
+        // NOTE this clones the data
+        let send_data = match send_data
+            .as_rust()
+            .wrap_err("error in c to rust conversion")
+        {
+            Ok(i) => i,
+            Err(error) => {
+                error!(%error, "conversion errror");
+                sent(Err(error));
+                return;
+            }
+        };
+
+        debug!(?send_data, "object data received");
+
+        let mut client = client.clone();
+
+        rt.spawn(async move {
+            let ObjectSend {
+                interface,
+                path,
+                data,
+                timestamp,
+            } = send_data;
+
+            let result = if let Some(timestamp) = timestamp {
+                client
+                    .send_object_with_timestamp(&interface, &path, data, timestamp)
+                    .await
+            } else {
+                client.send_object(&interface, &path, data).await
+            };
+
+            info!(?result, "object data sent");
+
+            sent(result.wrap_err("error while sending object"));
         });
     }
 
