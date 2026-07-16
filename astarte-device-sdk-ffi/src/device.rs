@@ -3,7 +3,7 @@ use std::{
     mem,
     ptr::NonNull,
     str::FromStr,
-    sync::{RwLock, RwLockReadGuard},
+    sync::Arc,
     thread,
 };
 
@@ -23,6 +23,7 @@ use eyre::{Context, OptionExt, bail, eyre};
 use ffi_convert::{AsRust, CDrop, CReprOf, UnexpectedNullPointerError};
 use tokio::{
     runtime::Runtime,
+    sync::RwLock,
     task::{self, JoinHandle},
 };
 use tracing::{debug, error, info};
@@ -33,6 +34,18 @@ use crate::{
     config::{DeviceConfig, NativeDeviceConfig},
     data::{IndividualSend, NativeIndividualSend, NativeObjectSend, ObjectSend},
 };
+
+macro_rules! ok_or_call {
+    ($expr:expr, $callback:ident) => {
+        match $expr {
+            Ok(h) => h,
+            Err(e) => {
+                $callback(Err(e));
+                return;
+            }
+        }
+    };
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -46,8 +59,93 @@ pub struct NativeDeviceHandle(*mut OpaqueDeviceHadle);
 unsafe impl Send for NativeDeviceHandle {}
 
 impl NativeDeviceHandle {
-    pub fn new(opaque: *mut OpaqueDeviceHadle) -> Self {
-        Self(opaque)
+    pub fn new() -> eyre::Result<Self> {
+        let handle = Box::new(DeviceRuntimeHandle::new()?);
+
+        Self::c_repr_of(handle).wrap_err("can't construct native handle")
+    }
+
+    pub fn connect<CF, EF>(self, config: NativeDeviceConfig, connected: CF, exited: EF)
+    where
+        CF: FnOnce(eyre::Result<()>) + Send + 'static,
+        EF: FnOnce(eyre::Result<()>) + Send + 'static,
+    {
+        let handle = ok_or_call!(
+            self.borrow_as_rust().wrap_err("can't borrow native handle"),
+            connected
+        );
+
+        let config = ok_or_call!(config.as_rust().wrap_err("can't convert config"), connected);
+
+        handle.connect(config, connected, exited);
+    }
+
+    pub fn receive<F>(self, received: F)
+    where
+        F: FnOnce(eyre::Result<DeviceEvent>) + Send + 'static,
+    {
+        let handle = ok_or_call!(
+            self.borrow_as_rust().wrap_err("can't borrow native handle"),
+            received
+        );
+
+        handle.receive(received);
+    }
+
+    pub fn send_individual<F>(self, individual: *const NativeIndividualSend, sent: F)
+    where
+        F: FnOnce(eyre::Result<()>) + Send + 'static,
+    {
+        let handle = ok_or_call!(
+            self.borrow_as_rust().wrap_err("can't borrow native handle"),
+            sent
+        );
+
+        // SAFETY: the pointer has to be valid for the complete duration of the function
+        let individual = unsafe { individual.as_ref() }
+            .ok_or_eyre("send data is required to be non null and valid")
+            .and_then(|i| i.as_rust().wrap_err("can't convert individual"));
+
+        let individual = ok_or_call!(individual, sent);
+
+        handle.send_individual(individual, sent);
+    }
+
+    pub fn send_object<F>(self, object: *const NativeObjectSend, sent: F)
+    where
+        F: FnOnce(eyre::Result<()>) + Send + 'static,
+    {
+        let handle = ok_or_call!(
+            self.borrow_as_rust().wrap_err("can't borrow native handle"),
+            sent
+        );
+
+        // SAFETY: the pointer has to be valid for the complete duration of the function
+        let object = unsafe { object.as_ref() }
+            .ok_or_eyre("send data is required to be non null and valid")
+            .and_then(|o| o.as_rust().wrap_err("can't convert object"));
+
+        let object = ok_or_call!(object, sent);
+
+        handle.send_object(object, sent);
+    }
+
+    pub fn disconnect<F>(self, disconnected: F)
+    where
+        F: FnOnce(eyre::Result<()>) + Send + 'static,
+    {
+        let handle = ok_or_call!(
+            self.borrow_as_rust().wrap_err("can't borrow native handle"),
+            disconnected
+        );
+
+        handle.disconnect(disconnected);
+    }
+
+    pub fn free(self) -> eyre::Result<()> {
+        self.as_rust()
+            .map(drop)
+            .wrap_err("error while dropping handle")
     }
 }
 
@@ -69,8 +167,8 @@ impl CDrop for NativeDeviceHandle {
 }
 
 // to allow converting a boxed device handle to a native device handle
-impl CReprOf<Box<DeviceHandle>> for NativeDeviceHandle {
-    fn c_repr_of(input: Box<DeviceHandle>) -> Result<Self, ffi_convert::CReprOfError> {
+impl CReprOf<Box<DeviceRuntimeHandle>> for NativeDeviceHandle {
+    fn c_repr_of(input: Box<DeviceRuntimeHandle>) -> Result<Self, ffi_convert::CReprOfError> {
         let raw = Box::into_raw(input);
         // SAFETY we transmute it back to a DeviceHandle pointer
         let opaque = unsafe { mem::transmute(raw) };
@@ -81,100 +179,105 @@ impl CReprOf<Box<DeviceHandle>> for NativeDeviceHandle {
 
 // to allow getting a owned DeviceHandle from a pointer
 // NOTE this is unsafe since we don't know who is currently accessing the handle
-impl AsRust<Box<DeviceHandle>> for NativeDeviceHandle {
-    fn as_rust(&self) -> Result<Box<DeviceHandle>, ffi_convert::AsRustError> {
+impl AsRust<Box<DeviceRuntimeHandle>> for NativeDeviceHandle {
+    fn as_rust(&self) -> Result<Box<DeviceRuntimeHandle>, ffi_convert::AsRustError> {
         // SAFETY we transmute it back to a DeviceHandle pointer
-        let concrete: *mut DeviceHandle = unsafe { mem::transmute(self.0) };
+        let concrete: *mut DeviceRuntimeHandle = unsafe { mem::transmute(self.0) };
         let owned = unsafe { Box::from_raw(concrete) };
 
         Ok(owned)
     }
 }
 
-impl BorrowAsRust<DeviceHandle> for NativeDeviceHandle {
-    fn borrow_as_rust<'a>(self) -> Result<&'a DeviceHandle, UnexpectedNullPointerError> {
+impl BorrowAsRust<DeviceRuntimeHandle> for NativeDeviceHandle {
+    fn borrow_as_rust<'a>(self) -> Result<&'a DeviceRuntimeHandle, UnexpectedNullPointerError> {
         // SAFETY we transmute it back to a DeviceHandle pointer
         let ptr = NonNull::new(self.0).ok_or(UnexpectedNullPointerError)?;
-        let ptr: NonNull<DeviceHandle> = unsafe { mem::transmute(ptr) };
+        let ptr: NonNull<DeviceRuntimeHandle> = unsafe { mem::transmute(ptr) };
 
         Ok(unsafe { ptr.as_ref() })
     }
 }
 
-struct InnerDeviceData {
-    rt: Runtime,
+struct DeviceClientData {
     client: astarte_device_sdk::client::DeviceClient<Mqtt<MemoryStore, PairingApi>>,
     loop_handle: task::JoinHandle<()>,
 }
 
-pub struct DeviceHandle {
-    inner: RwLock<Option<InnerDeviceData>>,
-}
-
-impl DeviceHandle {
-    fn new(
-        rt: Runtime,
-        client: astarte_device_sdk::client::DeviceClient<Mqtt<MemoryStore, PairingApi>>,
-        loop_handle: task::JoinHandle<()>,
-    ) -> Self {
-        let inner = InnerDeviceData {
-            rt,
-            client,
-            loop_handle,
-        };
-
-        Self {
-            inner: RwLock::new(Some(inner)),
-        }
-    }
-
-    // blocking function call to create device handle
-    pub fn connect<F>(config: NativeDeviceConfig, loop_end: F) -> eyre::Result<Box<DeviceHandle>>
+impl DeviceClientData {
+    pub(crate) async fn connect<F>(config: DeviceConfig, exited: F) -> eyre::Result<Self>
     where
-        F: FnOnce(Result<(), astarte_device_sdk::Error>) + Send + 'static,
+        F: FnOnce(eyre::Result<()>) + Send + 'static,
     {
-        let config = config.as_rust()?;
+        let (client, connection) = Self::mk_device(config).await?;
 
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-
-        let result: eyre::Result<_> = rt.block_on(async move {
-            let (client, connection) = Self::mk_device(config).await?;
-
-            let loop_handle = Self::spawn_eventloop(connection, loop_end);
-
-            Ok((loop_handle, client))
-        });
-
-        let (loop_handle, client) = result?;
-
-        let device_handle = Box::new(Self::new(rt, client, loop_handle));
-
-        Ok(device_handle)
-    }
-
-    fn spawn_eventloop<C, F>(connection: C, loop_end: F) -> JoinHandle<()>
-    where
-        C: EventLoop + Send + 'static,
-        F: FnOnce(Result<(), astarte_device_sdk::Error>) + Send + 'static,
-    {
-        // tokio::task::spawn_blocking(move || {
-        //     let rt = tokio::runtime::Handle::current();
-
-        //     let result = rt
-        //         .block_on(connection.handle_events())
-        //         .inspect_err(|error| error!(%error, "help plz"));
-
-        //     loop_end(result);
-        // })
-        tokio::spawn(async move {
-            let result = connection.handle_events().await;
+        let loop_handle = tokio::spawn(async move {
+            let result = connection
+                .handle_events()
+                .await
+                .wrap_err("handle events error");
 
             tokio::task::block_in_place(move || {
-                loop_end(result);
+                exited(result);
             });
+        });
+
+        Ok(Self {
+            client,
+            loop_handle,
         })
+    }
+
+    pub(crate) async fn receive(&self) -> eyre::Result<DeviceEvent> {
+        self.client.recv().await.wrap_err("can't receive event")
+    }
+
+    pub(crate) async fn send_individual(&self, individual: IndividualSend) -> eyre::Result<()> {
+        let IndividualSend {
+            interface,
+            path,
+            data,
+            timestamp,
+        } = individual;
+
+        let mut client = self.client.clone();
+
+        let result = if let Some(timestamp) = timestamp {
+            client
+                .send_individual_with_timestamp(&interface, &path, data, timestamp)
+                .await
+        } else {
+            client.send_individual(&interface, &path, data).await
+        };
+
+        result.wrap_err("can't send individual")
+    }
+
+    pub(crate) async fn send_object(&self, object: ObjectSend) -> eyre::Result<()> {
+        let ObjectSend {
+            interface,
+            path,
+            data,
+            timestamp,
+        } = object;
+
+        let mut client = self.client.clone();
+
+        let result = if let Some(timestamp) = timestamp {
+            client
+                .send_object_with_timestamp(&interface, &path, data, timestamp)
+                .await
+        } else {
+            client.send_object(&interface, &path, data).await
+        };
+
+        result.wrap_err("can't send object")
+    }
+
+    pub(crate) async fn disconnect(mut self) -> eyre::Result<()> {
+        self.client.disconnect().await?;
+
+        self.loop_handle.await.wrap_err("can't join handle_events")
     }
 
     async fn mk_device(
@@ -206,287 +309,104 @@ impl DeviceHandle {
 
         Ok((client, connection))
     }
+}
 
-    fn inner_ref(&self) -> eyre::Result<RwLockReadGuard<'_, Option<InnerDeviceData>>> {
-        let Ok(read) = self.inner.try_read() else {
-            bail!("can't take write lock, already locked somewhere, retry");
-        };
+pub struct DeviceRuntimeHandle {
+    rt: Runtime,
+    inner: Arc<RwLock<Option<DeviceClientData>>>,
+}
 
-        Ok(read)
+impl DeviceRuntimeHandle {
+    pub fn new() -> eyre::Result<DeviceRuntimeHandle> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let inner = Arc::new(RwLock::new(None));
+
+        Ok(Self { rt, inner })
     }
 
-    // pub fn send<F>(handle: NativeDeviceHandle, sent: F, data: ())
-    // where
-    //     F: FnOnce(Result<(), astarte_device_sdk::Error>) + Send + 'static,
-    // {
-    //     let handle = handle.borrow_as_rust().wrap_err("can't borrow device")?;
+    // blocking function call to create device handle
+    pub fn connect<CF, EF>(&self, config: DeviceConfig, connected: CF, exited: EF)
+    where
+        CF: FnOnce(eyre::Result<()>) + Send + 'static,
+        EF: FnOnce(eyre::Result<()>) + Send + 'static,
+    {
+        // NOTE if we want to avoid this arc we could spawn a thread and make this function blocking ?
+        let inner = Arc::clone(&self.inner);
 
-    //     let inner = handle.inner_ref()?;
-    //     let inner = inner.as_ref().ok_or(eyre!("already disconnected"))?;
-    // }
-    //
+        self.rt.spawn(async move {
+            let mut inner = inner.write().await;
 
-    // fn receive_check() ->  {
+            if inner.is_some() {
+                connected(Err(eyre::eyre!("device already configured")));
+                return;
+            }
 
-    // }
+            let client = match DeviceClientData::connect(config, exited).await {
+                Ok(d) => d,
+                Err(e) => {
+                    connected(Err(e));
+                    return;
+                }
+            };
 
-    pub fn receive<F>(handle: NativeDeviceHandle, received: F)
+            *inner = Some(client);
+
+            connected(Ok(()));
+        });
+    }
+
+    pub fn receive<F>(&self, received: F)
     where
         F: FnOnce(eyre::Result<DeviceEvent>) + Send + 'static,
     {
-        let guard = handle
-            .borrow_as_rust()
-            .wrap_err("can't borrow device")
-            .and_then(|h| h.inner_ref());
+        let inner = Arc::clone(&self.inner);
 
-        let guard = match guard {
-            Ok(g) => g,
-            Err(e) => {
-                received(Err(e));
-                return;
-            }
-        };
+        self.rt.spawn(async move {
+            let client = inner.read().await;
+            let client = ok_or_call!(client.as_ref().ok_or_eyre("client not connected"), received);
 
-        let inner = match guard.as_ref().ok_or(eyre!("already disconnected")) {
-            Ok(i) => i,
-            Err(e) => {
-                received(Err(e));
-                return;
-            }
-        };
+            let result = client.receive().await;
 
-        let InnerDeviceData { rt, client, .. } = inner;
-
-        let client = client.clone();
-
-        rt.spawn(async move {
-            let event = client
-                .recv()
-                .await
-                .wrap_err("error while receiving message");
-            // .and_then(|e| {
-            //     NativeDeviceEvent::c_repr_of(e)
-            //         .wrap_err("can't make device event ffi compatible")
-            // });
-
-            received(event);
+            received(result);
         });
     }
 
-    pub fn send_individual<F>(
-        handle: NativeDeviceHandle,
-        send_data: *const NativeIndividualSend,
-        sent: F,
-    ) where
-        F: FnOnce(eyre::Result<()>) + Send + 'static,
-    {
-        let guard = handle
-            .borrow_as_rust()
-            .wrap_err("can't borrow device")
-            .and_then(|h| h.inner_ref());
-
-        let guard = match guard {
-            Ok(g) => g,
-            Err(e) => {
-                sent(Err(e));
-                return;
-            }
-        };
-
-        let inner = match guard.as_ref().ok_or(eyre!("already disconnected")) {
-            Ok(i) => i,
-            Err(e) => {
-                sent(Err(e));
-                return;
-            }
-        };
-
-        let InnerDeviceData { rt, client, .. } = inner;
-
-        let send_data = unsafe {
-            send_data
-                .as_ref()
-                .ok_or_eyre("send data is required to be non null and valid")
-        };
-        let send_data = match send_data {
-            Ok(s) => s,
-            Err(e) => {
-                error!(%e, "data reference error");
-                sent(Err(e));
-                return;
-            }
-        };
-
-        // NOTE this clones the data
-        let send_data = match send_data
-            .as_rust()
-            .wrap_err("error in c to rust conversion")
-        {
-            Ok(i) => i,
-            Err(error) => {
-                error!(%error, "conversion errror");
-                sent(Err(error));
-                return;
-            }
-        };
-
-        debug!(?send_data, "individual data received");
-
-        let mut client = client.clone();
-
-        rt.spawn(async move {
-            let IndividualSend {
-                interface,
-                path,
-                data,
-                timestamp,
-            } = send_data;
-
-            let result = if let Some(timestamp) = timestamp {
-                client
-                    .send_individual_with_timestamp(&interface, &path, data, timestamp)
-                    .await
-            } else {
-                client.send_individual(&interface, &path, data).await
-            };
-
-            info!(?result, "individual data sent");
-
-            sent(result.wrap_err("error while sending individual"));
-        });
-    }
-
-    pub fn send_object<F>(handle: NativeDeviceHandle, send_data: *const NativeObjectSend, sent: F)
+    pub fn send_individual<F>(&self, individual: IndividualSend, sent: F)
     where
         F: FnOnce(eyre::Result<()>) + Send + 'static,
     {
-        let guard = handle
-            .borrow_as_rust()
-            .wrap_err("can't borrow device")
-            .and_then(|h| h.inner_ref());
+        let inner = Arc::clone(&self.inner);
 
-        let guard = match guard {
-            Ok(g) => g,
-            Err(e) => {
-                sent(Err(e));
-                return;
-            }
-        };
+        self.rt.spawn(async move {
+            let client = inner.read().await;
+            let client = ok_or_call!(client.as_ref().ok_or_eyre("client not connected"), sent);
 
-        let inner = match guard.as_ref().ok_or(eyre!("already disconnected")) {
-            Ok(i) => i,
-            Err(e) => {
-                sent(Err(e));
-                return;
-            }
-        };
+            let result = client.send_individual(individual).await;
 
-        let InnerDeviceData { rt, client, .. } = inner;
-
-        let send_data = unsafe {
-            send_data
-                .as_ref()
-                .ok_or_eyre("send data is required to be non null and valid")
-        };
-        let send_data = match send_data {
-            Ok(s) => s,
-            Err(e) => {
-                error!(%e, "data reference error");
-                sent(Err(e));
-                return;
-            }
-        };
-
-        // NOTE this clones the data
-        let send_data = match send_data
-            .as_rust()
-            .wrap_err("error in c to rust conversion")
-        {
-            Ok(i) => i,
-            Err(error) => {
-                error!(%error, "conversion errror");
-                sent(Err(error));
-                return;
-            }
-        };
-
-        debug!(?send_data, "object data received");
-
-        let mut client = client.clone();
-
-        rt.spawn(async move {
-            let ObjectSend {
-                interface,
-                path,
-                data,
-                timestamp,
-            } = send_data;
-
-            let result = if let Some(timestamp) = timestamp {
-                client
-                    .send_object_with_timestamp(&interface, &path, data, timestamp)
-                    .await
-            } else {
-                client.send_object(&interface, &path, data).await
-            };
-
-            info!(?result, "object data sent");
-
-            sent(result.wrap_err("error while sending object"));
+            sent(result);
         });
     }
 
-    // fn send_data(handle: NativeDeviceHandle) {
-    //     let handle = handle.borrow_as_rust().wrap_err("can't borrow device")?;
-    // }
+    pub fn send_object<F>(&self, object: ObjectSend, sent: F)
+    where
+        F: FnOnce(eyre::Result<()>) + Send + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
 
-    // fn handle_poll_command(
-    //     poll_command: PollCommand,
-    //     client: impl Client + Clone + Send + 'static,
-    // ) {
-    //     let PollCommand {
-    //         callback,
-    //         user_data,
-    //     } = poll_command;
+        self.rt.spawn(async move {
+            let client = inner.read().await;
+            let client = ok_or_call!(client.as_ref().ok_or_eyre("client not connected"), sent);
 
-    //     tokio::spawn(async move {
-    //         let result = client.recv().await;
+            let result = client.send_object(object).await;
 
-    //         let event = match result {
-    //             Ok(e) => e,
-    //             Err(e) => {
-    //                 error!(%e, "error while receiving");
+            sent(result);
+        });
+    }
 
-    //                 callback(
-    //                     Err(DiplomatOwnedUTF8StrSlice::from(
-    //                         e.to_string().into_boxed_str(),
-    //                     ))
-    //                     .into(),
-    //                     user_data.load(std::sync::atomic::Ordering::Relaxed),
-    //                 );
-
-    //                 return;
-    //             }
-    //         };
-
-    //         let DeviceEvent {
-    //             interface,
-    //             path,
-    //             data,
-    //         } = event;
-
-    //         // NOTE this stuff needs to be freed
-    //         let event = ReceiveEvent::new(interface, path, data);
-
-    //         callback(
-    //             Ok(event).into(),
-    //             user_data.load(std::sync::atomic::Ordering::Relaxed),
-    //         );
-    //     });
-    // }
-    //
-
-    fn into_inner(handle: NativeDeviceHandle) -> eyre::Result<InnerDeviceData> {
+    fn into_inner(handle: NativeDeviceHandle) -> eyre::Result<DeviceClientData> {
         let handle = handle.borrow_as_rust().wrap_err("can't borrow device")?;
 
         let Ok(mut write) = handle.inner.try_write() else {
@@ -497,114 +417,21 @@ impl DeviceHandle {
     }
 
     // this does not free the handle that has to be freed after using [`free`]
-    pub fn disconnect(handle: NativeDeviceHandle) -> eyre::Result<()> {
-        let inner = Self::into_inner(handle)?;
+    pub fn disconnect<F>(&self, disconnected: F)
+    where
+        F: FnOnce(eyre::Result<()>) + Send + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
 
-        let InnerDeviceData {
-            rt,
-            mut client,
-            loop_handle,
-        } = inner;
+        self.rt.spawn(async move {
+            let mut client = inner.write().await;
+            let client = ok_or_call!(
+                client.take().ok_or_eyre("client not connected"),
+                disconnected
+            );
 
-        // info!("spawning disconnect task");
-        // rt.spawn_blocking(move || {
-        //     let rt = tokio::runtime::Handle::current();
-
-        //     let result = rt.block_on(async move {
-        //         info!("disconnecting");
-
-        //         client
-        //             .disconnect()
-        //             .await
-        //             .wrap_err("cannot disconnect client")?;
-
-        //         info!("disconnected");
-
-        //         loop_handle.await.wrap_err("error while joining task")?;
-
-        //         info!("joined loop");
-
-        //         Ok(())
-        //     });
-
-        //     disconnect_cbk(result);
-        // });
-
-        let result = rt.block_on(async move {
-            info!("disconnecting");
-
-            client
-                .disconnect()
-                .await
-                .wrap_err("cannot disconnect client")?;
-
-            info!("disconnected");
-
-            loop_handle.await.wrap_err("error while joining task")?;
-
-            info!("joined loop");
-
-            Ok(())
+            let result = client.disconnect().await;
+            disconnected(result);
         });
-
-        info!("shutting down runtime");
-        rt.shutdown_background();
-
-        result
-    }
-
-    pub fn free(handle: NativeDeviceHandle) -> eyre::Result<()> {
-        handle
-            .as_rust()
-            .map(drop)
-            .wrap_err("error while dropping handle")
     }
 }
-
-// pub type DeviceHandleReceiveCallback =
-//     extern "C" fn(event: StringResult<ReceiveEvent>, user_data: UserData);
-
-// pub type DeviceHandleSendCallback = extern "C" fn(result: StringResult<()>, user_data: UserData);
-
-// pub type DeviceHandleDisconnectCallback =
-//     extern "C" fn(result: StringResult<()>, user_data: UserData);
-
-// pub struct SendValueCommand {
-//     interface: String,
-//     path: String,
-//     value: SendData,
-//     callback: DeviceHandleSendCallback,
-//     user_data: UserData,
-// }
-
-// pub struct PollCommand {
-//     callback: DeviceHandleReceiveCallback,
-//     user_data: UserData,
-// }
-
-// pub struct DisconnectCommand {
-//     callback: DeviceHandleDisconnectCallback,
-//     user_data: UserData,
-// }
-
-// impl DisconnectCommand {
-//     pub fn new(callback: DeviceHandleDisconnectCallback, user_data: UserData) -> Self {
-//         Self {
-//             callback,
-//             user_data,
-//         }
-//     }
-// }
-
-// pub enum DeviceCommand {
-//     SendValue(SendValueCommand),
-//     Poll(PollCommand),
-//     Disconnect(DisconnectCommand),
-// }
-
-// pub struct ReceiveEvent {
-//     data: (),
-// }
-// pub struct SendData {
-//     data: (),
-// }

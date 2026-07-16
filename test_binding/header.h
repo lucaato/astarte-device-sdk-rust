@@ -3,6 +3,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+typedef struct OpaqueDeviceHadle {
+
+} OpaqueDeviceHadle;
+
+typedef struct OpaqueDeviceHadle *NativeDeviceHandle;
+
 typedef struct NativeDeviceConfig {
   const char *device_id;
   const char *cred_secr;
@@ -11,35 +17,7 @@ typedef struct NativeDeviceConfig {
   const char *interfaces_dir;
 } NativeDeviceConfig;
 
-typedef struct OpaqueDeviceHadle {
-
-} OpaqueDeviceHadle;
-
-typedef struct OpaqueDeviceHadle *NativeDeviceHandle;
-
 typedef const char *StaticString;
-
-typedef enum NativeStringResult_NativeDeviceHandle_Tag {
-  Ok_NativeDeviceHandle,
-  Err_NativeDeviceHandle,
-} NativeStringResult_NativeDeviceHandle_Tag;
-
-typedef struct NativeStringResult_NativeDeviceHandle {
-  NativeStringResult_NativeDeviceHandle_Tag tag;
-  union {
-    struct {
-      NativeDeviceHandle ok;
-    };
-    struct {
-      StaticString err;
-    };
-  };
-} NativeStringResult_NativeDeviceHandle;
-
-typedef void *UserData;
-
-typedef void (*DeviceHandleConnectCallback)(const struct NativeStringResult_NativeDeviceHandle *result,
-                                            UserData user_data);
 
 typedef enum NativeStringResult_bool_Tag {
   Ok_bool,
@@ -58,11 +36,13 @@ typedef struct NativeStringResult_bool {
   };
 } NativeStringResult_bool;
 
+typedef void *UserData;
+
+typedef void (*DeviceHandleBuildCallback)(const struct NativeStringResult_bool *result,
+                                          UserData user_data);
+
 typedef void (*DeviceHandleLoopCallback)(const struct NativeStringResult_bool *result,
                                          UserData user_data);
-
-typedef void (*DeviceHandleDisconnectCallback)(const struct NativeStringResult_bool *result,
-                                               UserData user_data);
 
 /**
  * A utility type to represent arrays of the parametrized type.
@@ -557,30 +537,36 @@ typedef struct NativeObjectSend {
   struct NativeOption_NativeTimestamp timestamp;
 } NativeObjectSend;
 
-void device_handle_connect(struct NativeDeviceConfig config,
-                           DeviceHandleConnectCallback connect_cbk,
-                           UserData connect_user_data,
+typedef void (*DeviceHandleDisconnectCallback)(const struct NativeStringResult_bool *result,
+                                               UserData user_data);
+
+NativeDeviceHandle device_handle_init(void);
+
+void device_handle_connect(NativeDeviceHandle handle,
+                           struct NativeDeviceConfig config,
+                           DeviceHandleBuildCallback build_cbk,
+                           UserData build_user_data,
                            DeviceHandleLoopCallback loop_cbk,
                            UserData loop_user_data);
-
-void device_handle_free(NativeDeviceHandle handle);
-
-void device_handle_disconnect(NativeDeviceHandle handle,
-                              DeviceHandleDisconnectCallback disconnect_cbk,
-                              UserData user_data);
 
 void device_client_receive(NativeDeviceHandle device_handle,
                            DeviceHandleReceiveCallback callback,
                            UserData user_data);
 
-void device_client_free_device_event(struct NativeDeviceEvent event);
+void device_handle_free_device_event(struct NativeDeviceEvent event);
 
-void device_client_send_individual(NativeDeviceHandle device_handle,
+void device_handle_send_individual(NativeDeviceHandle device_handle,
                                    const struct NativeIndividualSend *data,
                                    DeviceHandleSendCallback callback,
                                    UserData user_data);
 
-void device_client_send_object(NativeDeviceHandle device_handle,
+void device_handle_send_object(NativeDeviceHandle device_handle,
                                const struct NativeObjectSend *data,
                                DeviceHandleSendCallback callback,
                                UserData user_data);
+
+void device_handle_disconnect(NativeDeviceHandle handle,
+                              DeviceHandleDisconnectCallback disconnect_cbk,
+                              UserData user_data);
+
+void device_handle_free(NativeDeviceHandle handle);

@@ -13,7 +13,7 @@ use tracing::{error, info, level_filters::LevelFilter};
 use crate::{
     config::NativeDeviceConfig,
     data::{NativeDeviceData, NativeDeviceEvent, NativeIndividualSend, NativeObjectSend},
-    device::{DeviceHandle, NativeDeviceHandle, OpaqueDeviceHadle},
+    device::{DeviceRuntimeHandle, NativeDeviceHandle, OpaqueDeviceHadle},
 };
 
 pub mod config;
@@ -120,6 +120,23 @@ pub enum NativeStringResult<T> {
     Err(StaticString),
 }
 
+impl<T> NativeStringResult<T> {
+    fn err_const_str(e: eyre::Report) -> Result<StaticString, CReprOfError> {
+        let report_string = format!("{e:?}");
+
+        StaticString::c_repr_of(report_string)
+    }
+
+    pub(crate) fn from_report(result: eyre::Result<T>) -> Result<Self, CReprOfError> {
+        let native = match result {
+            Ok(o) => Self::Ok(o),
+            Err(e) => Self::Err(Self::err_const_str(e)?),
+        };
+
+        Ok(native)
+    }
+}
+
 impl<T> CDrop for NativeStringResult<T> {
     fn do_drop(&mut self) -> Result<(), ffi_convert::CDropError> {
         // fields are automatically dropped by rust drop glue
@@ -131,11 +148,7 @@ impl<T, U: CDrop + CReprOf<T>> CReprOf<eyre::Result<T>> for NativeStringResult<U
     fn c_repr_of(input: eyre::Result<T>) -> Result<Self, CReprOfError> {
         let native = match input {
             Ok(o) => Self::Ok(U::c_repr_of(o)?),
-            Err(e) => {
-                let report_string = format!("{e:?}");
-
-                Self::Err(StaticString::c_repr_of(report_string)?)
-            }
+            Err(e) => Self::Err(Self::err_const_str(e)?),
         };
 
         Ok(native)
@@ -165,33 +178,29 @@ fn init_tracing() {
         .unwrap();
 }
 
-pub type DeviceHandleConnectCallback =
-    extern "C" fn(result: *const NativeStringResult<NativeDeviceHandle>, user_data: UserData);
+#[unsafe(no_mangle)]
+pub extern "C" fn device_handle_init() -> NativeDeviceHandle {
+    // NOTE if we want the result here we need to free in the caller
+    let handle_result = NativeDeviceHandle::new().unwrap();
+    // let native_result = NativeStringResult::from_report(handle_result).unwrap();
+    // native_result
+    handle_result
+}
+
+pub type DeviceHandleBuildCallback =
+    extern "C" fn(result: *const NativeStringResult<bool>, user_data: UserData);
 
 pub type DeviceHandleLoopCallback =
     extern "C" fn(result: *const NativeStringResult<bool>, user_data: UserData);
 
-// #[unsafe(no_mangle)]
-// pub extern "C" fn test_free() {
-//     let err = eyre::eyre!("this is a test error");
-
-//     let result: eyre::Result<bool> = Err(err);
-
-//     let string_res = NativeStringResult::<bool>::c_repr_of(result).unwrap();
-
-//     println!("{:?}", string_res);
-// }
-
-#[unsafe(no_mangle)]
-pub extern "C" fn device_handle_init() ->  {
-    
-}
-
+// NOTE this function is called connect but after the callback is called we are still not connected
+// this could result in surprising behaviour in case of non stored datastream send which would get dropped
 #[unsafe(no_mangle)]
 pub extern "C" fn device_handle_connect(
+    handle: NativeDeviceHandle,
     config: NativeDeviceConfig,
-    connect_cbk: DeviceHandleConnectCallback,
-    connect_user_data: UserData,
+    build_cbk: DeviceHandleBuildCallback,
+    build_user_data: UserData,
     loop_cbk: DeviceHandleLoopCallback,
     loop_user_data: UserData,
 ) {
@@ -205,7 +214,16 @@ pub extern "C" fn device_handle_connect(
         .unwrap();
     // FIXME remove this end
 
-    let loop_end = move |result: Result<(), astarte_device_sdk::Error>| {
+    let connected = move |result: eyre::Result<()>| {
+        let result: eyre::Result<bool> =
+            result.wrap_err("error while building client").map(|_| true);
+
+        let c_res = NativeStringResult::c_repr_of(result).unwrap();
+
+        build_cbk(&c_res, build_user_data);
+    };
+
+    let exited = move |result: eyre::Result<()>| {
         let result: eyre::Result<bool> = result.wrap_err("error in handle_events").map(|_| true);
 
         let c_res = NativeStringResult::c_repr_of(result).unwrap();
@@ -213,39 +231,7 @@ pub extern "C" fn device_handle_connect(
         loop_cbk(&c_res, loop_user_data);
     };
 
-    thread::spawn(move || {
-        let result = DeviceHandle::connect(config, loop_end);
-
-        let c_res = NativeStringResult::c_repr_of(result).unwrap();
-
-        connect_cbk(&c_res, connect_user_data);
-    });
-}
-
-// this function just frees the box associated with the handle but does not disconnect directly the device
-#[unsafe(no_mangle)]
-pub extern "C" fn device_handle_free(handle: NativeDeviceHandle) {
-    if let Err(e) = DeviceHandle::free(handle) {
-        error!("{e:#}");
-    }
-}
-
-pub type DeviceHandleDisconnectCallback =
-    extern "C" fn(result: *const NativeStringResult<bool>, user_data: UserData);
-
-#[unsafe(no_mangle)]
-pub extern "C" fn device_handle_disconnect(
-    handle: NativeDeviceHandle,
-    disconnect_cbk: DeviceHandleDisconnectCallback,
-    user_data: UserData,
-) {
-    thread::spawn(move || {
-        let result = DeviceHandle::disconnect(handle).map(|_| true);
-
-        let c_res = NativeStringResult::c_repr_of(result).unwrap();
-
-        disconnect_cbk(&c_res, user_data);
-    });
+    handle.connect(config, connected, exited);
 }
 
 pub type DeviceHandleReceiveCallback = extern "C" fn(
@@ -259,52 +245,80 @@ pub extern "C" fn device_client_receive(
     callback: DeviceHandleReceiveCallback,
     user_data: UserData,
 ) {
-    let cbk = move |res| {
+    let received = move |res| {
         let c_res = NativeStringResult::c_repr_of(res).unwrap();
 
         callback(&c_res, user_data);
     };
 
-    DeviceHandle::receive(device_handle, cbk);
+    device_handle.receive(received);
 }
 
 // NOTE since device event could contain a lot of data we avoid copying it when over to foreign functions
+// this has to be called by calling code
 #[unsafe(no_mangle)]
-pub extern "C" fn device_client_free_device_event(mut event: NativeDeviceEvent) {
-    event.do_drop().unwrap()
+pub extern "C" fn device_handle_free_device_event(mut event: NativeDeviceEvent) {
+    if let Err(e) = event.do_drop() {
+        error!("{e:#}");
+    }
 }
 
 pub type DeviceHandleSendCallback =
     extern "C" fn(result: *const NativeStringResult<bool>, user_data: UserData);
 
 #[unsafe(no_mangle)]
-pub extern "C" fn device_client_send_individual(
+pub extern "C" fn device_handle_send_individual(
     device_handle: NativeDeviceHandle,
     data: *const NativeIndividualSend,
     callback: DeviceHandleSendCallback,
     user_data: UserData,
 ) {
-    let cbk = move |res: eyre::Result<()>| {
+    let sent = move |res: eyre::Result<()>| {
         let c_res = NativeStringResult::c_repr_of(res.map(|_| true)).unwrap();
 
         callback(&c_res, user_data);
     };
 
-    DeviceHandle::send_individual(device_handle, data, cbk);
+    device_handle.send_individual(data, sent);
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn device_client_send_object(
+pub extern "C" fn device_handle_send_object(
     device_handle: NativeDeviceHandle,
     data: *const NativeObjectSend,
     callback: DeviceHandleSendCallback,
     user_data: UserData,
 ) {
-    let cbk = move |res: eyre::Result<()>| {
+    let sent = move |res: eyre::Result<()>| {
         let c_res = NativeStringResult::c_repr_of(res.map(|_| true)).unwrap();
 
         callback(&c_res, user_data);
     };
 
-    DeviceHandle::send_object(device_handle, data, cbk);
+    device_handle.send_object(data, sent);
+}
+
+pub type DeviceHandleDisconnectCallback =
+    extern "C" fn(result: *const NativeStringResult<bool>, user_data: UserData);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn device_handle_disconnect(
+    handle: NativeDeviceHandle,
+    disconnect_cbk: DeviceHandleDisconnectCallback,
+    user_data: UserData,
+) {
+    let disconnected = move |res: eyre::Result<()>| {
+        let c_res = NativeStringResult::c_repr_of(res.map(|_| true)).unwrap();
+
+        disconnect_cbk(&c_res, user_data);
+    };
+
+    handle.disconnect(disconnected);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn device_handle_free(handle: NativeDeviceHandle) {
+    if let Err(e) = handle.free() {
+        error!("{e:#}");
+    }
 }
